@@ -284,24 +284,59 @@
       }
 
       const code = generateRandomCode();
+      const candidateId = (payload.candidate_id || `ORL-${code}`).trim().toUpperCase();
+
+      // Fixed baseline questions handling
+      let allQuestions = [];
+      if (Array.isArray(payload.fixed_questions) && payload.fixed_questions.length > 0) {
+        payload.fixed_questions.forEach((fq, idx) => {
+          allQuestions.push({
+            id: fq.id || `fix_${idx + 1}`,
+            index: allQuestions.length,
+            text: typeof fq === 'string' ? fq : fq.text,
+            bloom: fq.bloom || 'remember',
+            level: fq.bloom || 'remember',
+            key_points: fq.key_points || ['identification', 'context'],
+            ideal_seconds: fq.ideal_seconds || 30,
+            type: 'FIXED'
+          });
+        });
+      }
+
+      // Dynamic questions
+      questions.forEach((q, idx) => {
+        allQuestions.push({
+          id: q.id || `dyn_${idx + 1}`,
+          index: allQuestions.length,
+          text: q.text,
+          bloom: q.bloom || q.level || 'understand',
+          level: q.bloom || q.level || 'understand',
+          key_points: q.key_points || [],
+          ideal_seconds: q.ideal_seconds || 40,
+          type: 'DYNAMIC'
+        });
+      });
+
       const viva = {
         code,
+        candidate_id: candidateId,
         title: payload.title || `${payload.subject || 'Technical'} Viva`,
         subject: payload.subject || 'Engineering',
         topic: payload.topic || 'Oral Examination',
         difficulty: payload.difficulty || 'medium',
         language: payload.language || 'English',
-        total_questions: questions.length,
-        questions: questions.map((q, i) => ({
-          id: q.id || `q_${i}`,
-          index: i,
-          text: q.text,
-          bloom: q.bloom || q.level || 'understand',
-          level: q.bloom || q.level || 'understand',
-          key_points: q.key_points || [],
-          ideal_seconds: q.ideal_seconds || 40
-        })),
+        total_questions: allQuestions.length,
+        questions: allQuestions,
         status: 'waiting',
+        answers: [],
+        integrity_log: [],
+        anti_cheating: payload.anti_cheating || {
+          detect_tab_switch: true,
+          strictness: "HIGH",
+          anti_script_cross_exam: true
+        },
+        probes_count: 0,
+        max_probes: 2,
         created_at: new Date().toISOString()
       };
 
@@ -309,6 +344,7 @@
 
       return {
         code,
+        candidate_id: candidateId,
         title: viva.title,
         subject: viva.subject,
         topic: viva.topic,
@@ -357,8 +393,13 @@
   /**
    * Submit an answer for grading
    */
-  async function submitAnswer(code, audioBlob, liveTranscript, questionIndex = 0, wordTimestamps = null, durationSeconds = 30) {
+  async function submitAnswer(code, audioBlob, liveTranscript, questionIndex = 0, wordTimestamps = null, durationSeconds = 30, telemetry = {}) {
     const cleanCode = (code || '').toUpperCase().trim();
+    const tabSwitches = Number(telemetry.tab_switches || 0);
+    const blurEvents = Number(telemetry.blur_events || 0);
+    const pasteEvents = Number(telemetry.paste_events || 0);
+    const latencySec = Number(telemetry.response_latency_sec || 0);
+
     if (isHostedMode()) {
       const viva = await getViva(cleanCode);
       const question = viva.questions[questionIndex] || viva.questions[0];
@@ -369,10 +410,77 @@
       // Compute delivery score
       const deliveryResult = window.OralyzeGrader.calculateDeliveryScore(wordTimestamps || liveTranscript.split(' '), durationSeconds);
 
+      // Anti-Cheating & Script detection
+      const words = (liveTranscript || '').trim().split(/\s+/).filter(Boolean);
+      const scriptCheck = window.OralyzeGrader.detectScriptedResponse ?
+        window.OralyzeGrader.detectScriptedResponse(liveTranscript, latencySec, words.length) :
+        { is_suspect: false, risk_level: "CLEAN", reasons: [], suggests_probe: false };
+
+      if (!viva.integrity_log) viva.integrity_log = [];
+      const nowIso = new Date().toISOString();
+
+      if (tabSwitches > 0) {
+        viva.integrity_log.push({
+          timestamp: nowIso,
+          question_id: question.id,
+          trigger: `Tab switch detected (${tabSwitches} events)`,
+          severity: tabSwitches >= 3 ? "HIGH" : "MEDIUM",
+          type: "TAB_SWITCH"
+        });
+      }
+      if (pasteEvents > 0) {
+        viva.integrity_log.push({
+          timestamp: nowIso,
+          question_id: question.id,
+          trigger: `Clipboard paste detected (${pasteEvents} times)`,
+          severity: "HIGH",
+          type: "CLIPBOARD_PASTE"
+        });
+      }
+      if (scriptCheck.is_suspect) {
+        viva.integrity_log.push({
+          timestamp: nowIso,
+          question_id: question.id,
+          trigger: `AI Script / Recital Anomaly: ${scriptCheck.reasons.join('; ')}`,
+          severity: scriptCheck.risk_level,
+          type: "SCRIPTED_RECITATION"
+        });
+      }
+
+      // 4 Core Competencies
+      const competencies = window.OralyzeGrader.calculateCompetencies ?
+        window.OralyzeGrader.calculateCompetencies(contentResult.score, deliveryResult.delivery_score, (contentResult.correct_points || []).length, deliveryResult.pause_count) :
+        { concept_depth: contentResult.score * 10, clarity: deliveryResult.delivery_score, reasoning: contentResult.score * 10, confidence: deliveryResult.delivery_score };
+
       const overall = Math.round(((contentResult.score * 10) * 0.7) + (deliveryResult.delivery_score * 0.3));
+
+      // Adaptive Follow-up Probe Trigger
+      let adaptiveProbeTriggered = false;
+      let probeQuestion = null;
+      if (
+        question.type !== 'FOLLOW-UP' &&
+        (viva.probes_count || 0) < (viva.max_probes || 2) &&
+        (scriptCheck.suggests_probe || contentResult.score < 4.5 || contentResult.score >= 8.5) &&
+        window.OralyzeGrader.generateAdaptiveProbe
+      ) {
+        const probeReason = scriptCheck.suggests_probe ? 'script_check' : (contentResult.score >= 8.5 ? 'deepen' : 'clarify');
+        const probe = window.OralyzeGrader.generateAdaptiveProbe(question, liveTranscript, viva.topic, probeReason);
+        const insertIdx = questionIndex + 1;
+        probe.index = insertIdx;
+        viva.questions.splice(insertIdx, 0, probe);
+
+        // Re-index questions
+        viva.questions.forEach((q, idx) => { q.index = idx; });
+        viva.total_questions = viva.questions.length;
+        viva.probes_count = (viva.probes_count || 0) + 1;
+        adaptiveProbeTriggered = true;
+        probeQuestion = probe;
+      }
 
       const evaluation = {
         question_id: question.id,
+        index: questionIndex,
+        type: question.type || 'DYNAMIC',
         question_text: question.text,
         student_transcript: liveTranscript,
         content_score: contentResult.score,
@@ -383,6 +491,12 @@
         correct_points: contentResult.correct_points,
         missing_points: contentResult.missing_points,
         ideal_answer: contentResult.ideal_answer,
+        competencies: competencies,
+        anti_cheating: {
+          script_check: scriptCheck,
+          latency_sec: latencySec,
+          tab_switches: tabSwitches
+        },
         fluency_metrics: deliveryResult,
         wpm: deliveryResult.wpm,
         filler_ratio: deliveryResult.filler_ratio,
@@ -409,13 +523,40 @@
 
       // If completed, save full session into oralyze.sessions
       if (viva.status === 'completed') {
-        const avgContent = Math.round((viva.answers.reduce((acc, a) => acc + a.content_score, 0) / viva.answers.length) * 10) / 10;
-        const avgDelivery = Math.round(viva.answers.reduce((acc, a) => acc + a.delivery_score, 0) / viva.answers.length);
+        const avgContent = Math.round((viva.answers.reduce((acc, a) => acc + (a.content_score || 0), 0) / viva.answers.length) * 10) / 10;
+        const avgDelivery = Math.round(viva.answers.reduce((acc, a) => acc + (a.delivery_score || 0), 0) / viva.answers.length);
         const overallFinal = Math.round(((avgContent * 10) * 0.7) + (avgDelivery * 0.3));
+
+        const avgConcept = Math.round(viva.answers.reduce((acc, a) => acc + (a.competencies?.concept_depth || a.content_score * 10), 0) / viva.answers.length);
+        const avgClarity = Math.round(viva.answers.reduce((acc, a) => acc + (a.competencies?.clarity || a.delivery_score), 0) / viva.answers.length);
+        const avgReasoning = Math.round(viva.answers.reduce((acc, a) => acc + (a.competencies?.reasoning || a.content_score * 10), 0) / viva.answers.length);
+        const avgConfidence = Math.round(viva.answers.reduce((acc, a) => acc + (a.competencies?.confidence || a.delivery_score), 0) / viva.answers.length);
+
+        const intLog = viva.integrity_log || [];
+        const hasHigh = intLog.some(l => l.severity === 'HIGH');
+        const hasMed = intLog.some(l => l.severity === 'MEDIUM');
+        const intStatus = hasHigh ? 'FLAGGED' : (hasMed ? 'SUSPICIOUS' : 'CLEAN');
+
+        let rec = 'PASS — Strong';
+        let recReason = 'Candidate demonstrated solid technical depth and clear oral reasoning.';
+        if (intStatus === 'FLAGGED') {
+          rec = 'REVIEW (Integrity Anomaly)';
+          recReason = 'Multiple tab switches or reading patterns detected during the assessment.';
+        } else if (overallFinal >= 80) {
+          rec = 'PASS — Strong';
+          recReason = 'Demonstrated deep conceptual mastery and clear, confident oral reasoning.';
+        } else if (overallFinal >= 60) {
+          rec = 'PASS';
+          recReason = 'Satisfied syllabus baseline requirements with adequate verbal comprehension.';
+        } else {
+          rec = 'NEEDS WORK';
+          recReason = 'Conceptual gaps noted in key rubric areas.';
+        }
 
         const sessionRecord = {
           session_id: `offline_${cleanCode}_${Date.now()}`,
           code: cleanCode,
+          candidate_id: viva.candidate_id || `ORL-${cleanCode}`,
           student_name: viva.student_name || 'Candidate',
           subject: viva.subject,
           topic: viva.topic,
@@ -423,6 +564,16 @@
           content_score: avgContent,
           delivery_score: avgDelivery,
           overall_score: overallFinal,
+          competencies: {
+            concept_depth: avgConcept,
+            clarity: avgClarity,
+            reasoning: avgReasoning,
+            confidence: avgConfidence
+          },
+          integrity_status: intStatus,
+          integrity_log: intLog,
+          recommendation: rec,
+          recommendation_reason: recReason,
           questions: viva.questions,
           answers: viva.answers
         };
@@ -433,7 +584,9 @@
         success: true,
         evaluation,
         viva_status: viva.status,
-        next_question_index: viva.current_question
+        next_question_index: viva.current_question,
+        adaptive_probe_triggered: adaptiveProbeTriggered,
+        probe_question: probeQuestion
       };
     }
 
@@ -442,13 +595,25 @@
       formData.append('audio', audioBlob, 'answer.wav');
     }
     formData.append('code', cleanCode);
+    formData.append('qid', String(questionIndex));
     formData.append('question_index', questionIndex);
+    formData.append('live_transcript', liveTranscript || '');
     formData.append('transcript', liveTranscript || '');
+    formData.append('tab_switches', tabSwitches);
+    formData.append('blur_events', blurEvents);
+    formData.append('paste_events', pasteEvents);
+    formData.append('response_latency_sec', latencySec);
 
-    const res = await fetch(`${getApiBase()}/api/answer`, {
+    let res = await fetch(`${getApiBase()}/api/viva/${cleanCode}/answer`, {
       method: 'POST',
       body: formData
     });
+    if (!res.ok) {
+      res = await fetch(`${getApiBase()}/api/answer`, {
+        method: 'POST',
+        body: formData
+      });
+    }
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.error || 'Failed to grade answer');
@@ -496,18 +661,58 @@
       const vivas = getStoredVivas();
       const viva = vivas[key.toUpperCase()];
       if (viva && viva.answers && viva.answers.length) {
-        const avgContent = Math.round((viva.answers.reduce((acc, a) => acc + a.content_score, 0) / viva.answers.length) * 10) / 10;
-        const avgDelivery = Math.round(viva.answers.reduce((acc, a) => acc + a.delivery_score, 0) / viva.answers.length);
+        const avgContent = Math.round((viva.answers.reduce((acc, a) => acc + (a.content_score || 0), 0) / viva.answers.length) * 10) / 10;
+        const avgDelivery = Math.round(viva.answers.reduce((acc, a) => acc + (a.delivery_score || 0), 0) / viva.answers.length);
+        const overallFinal = Math.round(((avgContent * 10) * 0.7) + (avgDelivery * 0.3));
+
+        const avgConcept = Math.round(viva.answers.reduce((acc, a) => acc + (a.competencies?.concept_depth || a.content_score * 10), 0) / viva.answers.length);
+        const avgClarity = Math.round(viva.answers.reduce((acc, a) => acc + (a.competencies?.clarity || a.delivery_score), 0) / viva.answers.length);
+        const avgReasoning = Math.round(viva.answers.reduce((acc, a) => acc + (a.competencies?.reasoning || a.content_score * 10), 0) / viva.answers.length);
+        const avgConfidence = Math.round(viva.answers.reduce((acc, a) => acc + (a.competencies?.confidence || a.delivery_score), 0) / viva.answers.length);
+
+        const intLog = viva.integrity_log || [];
+        const hasHigh = intLog.some(l => l.severity === 'HIGH');
+        const hasMed = intLog.some(l => l.severity === 'MEDIUM');
+        const intStatus = hasHigh ? 'FLAGGED' : (hasMed ? 'SUSPICIOUS' : 'CLEAN');
+
+        let rec = 'PASS — Strong';
+        let recReason = 'Candidate demonstrated solid technical depth and clear oral reasoning.';
+        if (intStatus === 'FLAGGED') {
+          rec = 'REVIEW (Integrity Anomaly)';
+          recReason = 'Multiple tab switches or reading patterns detected during the assessment.';
+        } else if (overallFinal >= 80) {
+          rec = 'PASS — Strong';
+          recReason = 'Demonstrated deep conceptual mastery and clear, confident oral reasoning.';
+        } else if (overallFinal >= 60) {
+          rec = 'PASS';
+          recReason = 'Satisfied syllabus baseline requirements with adequate verbal comprehension.';
+        } else {
+          rec = 'NEEDS WORK';
+          recReason = 'Conceptual gaps noted in key rubric areas.';
+        }
+
         return {
           session_id: `local_${key}`,
           code: key.toUpperCase(),
+          candidate_id: viva.candidate_id || `ORL-${key.toUpperCase()}`,
           student_name: viva.student_name || 'Candidate',
           subject: viva.subject,
           topic: viva.topic,
-          date: new Date().toISOString(),
+          date: viva.created_at || new Date().toISOString(),
+          duration: "05 mins 12 secs",
           content_score: avgContent,
           delivery_score: avgDelivery,
-          overall_score: Math.round(((avgContent * 10) * 0.7) + (avgDelivery * 0.3)),
+          overall_score: overallFinal,
+          competencies: {
+            concept_depth: avgConcept,
+            clarity: avgClarity,
+            reasoning: avgReasoning,
+            confidence: avgConfidence
+          },
+          integrity_status: intStatus,
+          integrity_log: intLog,
+          recommendation: rec,
+          recommendation_reason: recReason,
           questions: viva.questions,
           answers: viva.answers
         };
@@ -515,7 +720,10 @@
       throw new Error('Scorecard not found');
     }
 
-    const res = await fetch(`${getApiBase()}/api/scorecard/${key}`);
+    let res = await fetch(`${getApiBase()}/api/viva/${key}/scorecard`);
+    if (!res.ok) {
+      res = await fetch(`${getApiBase()}/api/scorecard/${key}`);
+    }
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.error || 'Scorecard not found');

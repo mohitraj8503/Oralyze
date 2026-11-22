@@ -149,8 +149,124 @@
     };
   }
 
+  function detectScriptedResponse(transcript, latencySec = 0, wordCount = 0) {
+    const raw = (transcript || '').trim();
+    const words = raw.split(/\s+/).filter(Boolean);
+    const totalWords = wordCount > 0 ? wordCount : words.length;
+
+    if (totalWords < 5) {
+      return {
+        is_suspect: false,
+        risk_level: 'CLEAN',
+        risk_score: 0,
+        reasons: [],
+        suggests_probe: false,
+        lexical_density: 0.0
+      };
+    }
+
+    const reasons = [];
+    let riskScore = 0;
+
+    // 1. Prompt-typing latency hesitation before instant recital
+    if (latencySec >= 4.8 && latencySec <= 9.2 && totalWords >= 15) {
+      riskScore += 40;
+      reasons.push(`Prompt-typing delay detected (${latencySec.toFixed(1)}s hesitation before fluent recital)`);
+    }
+
+    // 2. Formal written/textbook script markers
+    const scriptMarkers = [
+      "furthermore", "moreover", "in conclusion", "to summarize", "crucial aspect",
+      "it is essential to note", "firstly", "secondly", "subsequently", "delve into",
+      "in summary", "pivotal role", "seamlessly", "testament to"
+    ];
+    const textLow = raw.toLowerCase();
+    const matched = scriptMarkers.filter(m => textLow.includes(m));
+    if (matched.length > 0) {
+      riskScore += Math.min(matched.length * 20, 45);
+      reasons.push(`Formal written-script markers detected (${matched.slice(0, 3).join(', ')})`);
+    }
+
+    // 3. Polysyllabic lexical density
+    const longWords = words.filter(w => w.length >= 8);
+    const lexicalDensity = Math.round((longWords.length / Math.max(totalWords, 1)) * 100) / 100;
+    if (lexicalDensity >= 0.30 && totalWords >= 20) {
+      riskScore += 25;
+      reasons.push(`High written lexical density (${Math.round(lexicalDensity * 100)}% polysyllabic tokens)`);
+    }
+
+    let riskLevel = 'CLEAN';
+    if (riskScore >= 60) riskLevel = 'HIGH';
+    else if (riskScore >= 30) riskLevel = 'MEDIUM';
+    else if (riskScore >= 15) riskLevel = 'LOW';
+
+    const isSuspect = riskLevel === 'HIGH' || riskLevel === 'MEDIUM';
+
+    return {
+      is_suspect: isSuspect,
+      risk_level: riskLevel,
+      risk_score: riskScore,
+      reasons: reasons,
+      suggests_probe: isSuspect || riskScore >= 25,
+      lexical_density: lexicalDensity
+    };
+  }
+
+  function generateAdaptiveProbe(prevQuestion, prevAnswer, topic = '', reason = 'deepen') {
+    const ansLow = (prevAnswer || '').toLowerCase();
+    let text = "You noted that key concept—what is a specific edge-case scenario where that mechanism would fail?";
+    let keyPoints = ["edge case limitation", "failure mode", "alternative approach"];
+
+    if (ansLow.includes('index') || ansLow.includes('b+') || ansLow.includes('b tree') || ansLow.includes('clustered')) {
+      text = "You mentioned using an index there—what happens to write throughput and page splits when inserting 10,000 rows per second?";
+      keyPoints = ["write latency penalty", "page splits", "index maintenance overhead"];
+    } else if (ansLow.includes('acid') || ansLow.includes('transaction') || ansLow.includes('isolation')) {
+      text = "Under high concurrent load, what specific isolation anomaly could still occur with that setup?";
+      keyPoints = ["phantom read", "dirty read", "locking overhead", "serializability"];
+    } else if (ansLow.includes('deadlock') || ansLow.includes('semaphore') || ansLow.includes('mutex')) {
+      text = "How would you prevent circular wait dynamically in code without locking every resource upfront?";
+      keyPoints = ["resource ordering", "lock timeout", "banker's algorithm", "try-lock"];
+    } else if (ansLow.includes('tcp') || ansLow.includes('udp') || ansLow.includes('handshake')) {
+      text = "If packet loss suddenly increases to 20%, how does the congestion window scale down?";
+      keyPoints = ["slow start", "additive decrease", "retransmission timeout", "throughput drop"];
+    } else if (ansLow.includes('bfs') || ansLow.includes('dfs') || ansLow.includes('tree') || ansLow.includes('graph')) {
+      text = "If the graph contains cycles or deep paths, how does memory consumption compare between BFS and DFS?";
+      keyPoints = ["call stack overflow in DFS", "queue memory in wide BFS", "visited set"];
+    } else if (reason === 'script_check') {
+      text = "Can you briefly walk me through a real project or situation where you had to debug that exact trade-off?";
+      keyPoints = ["personal implementation experience", "trade-off explanation", "practical troubleshooting"];
+    }
+
+    return {
+      id: `probe_${Date.now() % 100000}`,
+      text: text,
+      type: "FOLLOW-UP",
+      bloom: "analyse",
+      key_points: keyPoints,
+      ideal_seconds: 35,
+      probe_reason: reason
+    };
+  }
+
+  function calculateCompetencies(contentScore, deliveryScore, correctPointsCount, pauseCount) {
+    const conceptDepth = Math.round(Math.min(100, (contentScore || 0) * 10));
+    const clarity = Math.round(deliveryScore || 0);
+    const reasoning = Math.round(Math.min(100, ((correctPointsCount || 0) * 25) + ((contentScore || 0) * 5)));
+    const confidence = Math.round(Math.max(30, Math.min(100, (deliveryScore || 0) - ((pauseCount || 0) * 3.5))));
+
+    return {
+      concept_depth: conceptDepth,
+      clarity: clarity,
+      reasoning: reasoning,
+      confidence: confidence
+    };
+  }
+
   window.OralyzeGrader = {
     gradeAnswer,
-    calculateDeliveryScore
+    calculateDeliveryScore,
+    detectScriptedResponse,
+    generateAdaptiveProbe,
+    calculateCompetencies
   };
 })();

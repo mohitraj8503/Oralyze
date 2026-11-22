@@ -27,7 +27,14 @@ import uuid
 from flask import Flask, jsonify, request, send_from_directory
 from config import Config
 from services.fluency import analyze_fluency
-from services.granite import generate_questions, grade_answer, preview_viva_from_prompt
+from services.granite import (
+    generate_questions,
+    grade_answer,
+    preview_viva_from_prompt,
+    detect_scripted_response,
+    generate_adaptive_probe,
+    build_hybrid_questions,
+)
 from services.speech import synthesize, transcribe
 from services import store
 
@@ -187,10 +194,25 @@ def create_viva():
         source = preview_res.get("source", "granite")
 
     code = _generate_code()
+    fixed_questions = data.get("fixed_questions")
+    candidate_id = (data.get("candidate_id") or f"ORL-{code}").strip().upper()
+    anti_cheating = data.get("anti_cheating") or {
+        "detect_tab_switch": True,
+        "strictness": "HIGH",
+        "anti_script_cross_exam": True
+    }
+
+    # Build hybrid queue with fixed questions + candidate-seeded dynamic questions
+    hybrid_queue = build_hybrid_questions(
+        fixed_questions=fixed_questions,
+        dynamic_questions=raw_questions,
+        candidate_seed=candidate_id
+    )
+
     questions = []
     audio_cache = {}
 
-    for idx, q in enumerate(raw_questions):
+    for idx, q in enumerate(hybrid_queue):
         qid = q.get("id") or f"q_{idx}"
         q_item = {
             "id": qid,
@@ -199,7 +221,8 @@ def create_viva():
             "bloom": q.get("bloom", q.get("level", "understand")),
             "level": q.get("bloom", q.get("level", "understand")),
             "key_points": q.get("key_points", []),
-            "ideal_seconds": q.get("ideal_seconds", 40)
+            "ideal_seconds": q.get("ideal_seconds", 40),
+            "type": q.get("type", "DYNAMIC")
         }
         questions.append(q_item)
 
@@ -212,6 +235,7 @@ def create_viva():
     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
     room = {
         "code": code,
+        "candidate_id": candidate_id,
         "title": title,
         "subject": subject,
         "topic": topic,
@@ -226,6 +250,10 @@ def create_viva():
         "current_index": 0,
         "student_name": "Student",
         "answers": [],
+        "integrity_log": [],
+        "anti_cheating": anti_cheating,
+        "probes_count": 0,
+        "max_probes": 2,
         "created_at": now_iso
     }
     VIVAS[code] = room
@@ -237,11 +265,13 @@ def create_viva():
         "bloom": q["bloom"],
         "level": q["level"],
         "key_points": q["key_points"],
-        "ideal_seconds": q["ideal_seconds"]
+        "ideal_seconds": q["ideal_seconds"],
+        "type": q.get("type", "DYNAMIC")
     } for q in questions]
 
     return jsonify({
         "code": code,
+        "candidate_id": candidate_id,
         "title": title,
         "subject": subject,
         "topic": topic,
@@ -279,6 +309,7 @@ def get_viva(code: str):
 
     return jsonify({
         "code": room["code"],
+        "candidate_id": room.get("candidate_id", f"ORL-{room['code']}"),
         "subject": room["subject"],
         "topic": room["topic"],
         "level": room.get("level") or room.get("difficulty") or "medium",
@@ -290,7 +321,9 @@ def get_viva(code: str):
             "id": q_curr["id"],
             "index": q_curr["index"],
             "text": q_curr["text"],
-            "level": q_curr["level"]
+            "level": q_curr["level"],
+            "bloom": q_curr.get("bloom", q_curr["level"]),
+            "type": q_curr.get("type", "DYNAMIC")
         } if q_curr else None,
         "audio_b64": audio_b64,
         "created_at": room["created_at"]
@@ -375,14 +408,94 @@ def submit_viva_answer(code: str):
     # 3. Delivery Fluency Analytics
     fluency_eval = analyze_fluency(words=words, transcript=transcript, language=language)
 
-    # 4. Total Combined Score
-    # Content: 0-10 -> content_pct = score * 10
-    # Delivery: 0-100
-    # Total: 70% content + 30% delivery
+    # 4. Anti-Cheating & Telemetry Ingestion
+    tab_switches = int(request.form.get("tab_switches", 0) or 0)
+    blur_events = int(request.form.get("blur_events", 0) or 0)
+    paste_events = int(request.form.get("paste_events", 0) or 0)
+    try:
+        latency_sec = float(request.form.get("response_latency_sec", 0.0) or 0.0)
+    except (ValueError, TypeError):
+        latency_sec = 0.0
+
+    script_check = detect_scripted_response(
+        transcript=transcript,
+        latency_sec=latency_sec,
+        word_count=len(words)
+    )
+
+    if "integrity_log" not in room:
+        room["integrity_log"] = []
+
+    now_iso_ts = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    if tab_switches > 0:
+        room["integrity_log"].append({
+            "timestamp": now_iso_ts,
+            "question_id": matched_q["id"],
+            "trigger": f"Tab switch detected ({tab_switches} events)",
+            "severity": "HIGH" if tab_switches >= 3 else "MEDIUM",
+            "type": "TAB_SWITCH"
+        })
+    if paste_events > 0:
+        room["integrity_log"].append({
+            "timestamp": now_iso_ts,
+            "question_id": matched_q["id"],
+            "trigger": f"Clipboard paste detected ({paste_events} times)",
+            "severity": "HIGH",
+            "type": "CLIPBOARD_PASTE"
+        })
+    if script_check["is_suspect"]:
+        room["integrity_log"].append({
+            "timestamp": now_iso_ts,
+            "question_id": matched_q["id"],
+            "trigger": f"AI Script/Recital Anomaly: {'; '.join(script_check['reasons'])}",
+            "severity": script_check["risk_level"],
+            "type": "SCRIPTED_RECITATION"
+        })
+
+    # 5. Core Competency Scores (0 to 100)
     content_score = float(content_eval.get("score", 0.0))
     content_pct = round(content_score * 10.0, 1)
     fluency_score = float(fluency_eval.get("fluency_score", 0.0))
     total = round((0.70 * content_pct) + (0.30 * fluency_score), 1)
+
+    concept_depth = round(min(100.0, content_score * 10.0), 1)
+    clarity = round(fluency_score, 1)
+    reasoning = round(min(100.0, (len(content_eval.get("correct_points", [])) * 25.0) + (content_score * 5.0)), 1)
+    confidence = round(max(30.0, min(100.0, fluency_score - (len(fluency_eval.get("pauses", [])) * 3.5))), 1)
+
+    competencies = {
+        "concept_depth": concept_depth,
+        "clarity": clarity,
+        "reasoning": reasoning,
+        "confidence": confidence
+    }
+
+    # 6. Adaptive Follow-up Probe Trigger
+    adaptive_probe_triggered = False
+    probe_question = None
+    if (
+        matched_q.get("type") != "FOLLOW-UP"
+        and room.get("probes_count", 0) < room.get("max_probes", 2)
+        and (script_check["suggests_probe"] or content_score < 4.5 or content_score >= 8.5)
+    ):
+        reason = "script_check" if script_check["suggests_probe"] else ("deepen" if content_score >= 8.5 else "clarify")
+        probe = generate_adaptive_probe(
+            prev_question=matched_q,
+            prev_answer=transcript,
+            topic=room.get("topic", ""),
+            reason=reason
+        )
+        insert_idx = q_idx + 1
+        probe["index"] = insert_idx
+        room["questions"].insert(insert_idx, probe)
+
+        # Re-index all remaining questions
+        for idx, q_obj in enumerate(room["questions"]):
+            q_obj["index"] = idx
+        room["total"] = len(room["questions"])
+        room["probes_count"] = room.get("probes_count", 0) + 1
+        adaptive_probe_triggered = True
+        probe_question = probe
 
     next_index = q_idx + 1
     is_done = next_index >= room["total"]
@@ -390,10 +503,17 @@ def submit_viva_answer(code: str):
     answer_record = {
         "qid": matched_q["id"],
         "index": q_idx,
+        "type": matched_q.get("type", "DYNAMIC"),
         "question_text": matched_q["text"],
         "transcript": transcript,
         "content": content_eval,
         "delivery": fluency_eval,
+        "competencies": competencies,
+        "anti_cheating": {
+            "script_check": script_check,
+            "latency_sec": latency_sec,
+            "tab_switches": tab_switches
+        },
         "content_pct": content_pct,
         "total": total
     }
@@ -418,12 +538,16 @@ def submit_viva_answer(code: str):
     return jsonify({
         "qid": matched_q["id"],
         "index": q_idx,
+        "type": matched_q.get("type", "DYNAMIC"),
         "transcript": transcript,
         "content": content_eval,
         "delivery": fluency_eval,
+        "competencies": competencies,
         "total": total,
         "next_index": next_index,
-        "done": is_done
+        "done": is_done,
+        "adaptive_probe_triggered": adaptive_probe_triggered,
+        "probe_question": probe_question
     })
 
 
@@ -461,7 +585,7 @@ def get_viva_live(code: str):
 
 @app.route("/api/viva/<code>/scorecard", methods=["GET"])
 def get_viva_scorecard(code: str):
-    """Retrieve full scorecard for completed viva."""
+    """Retrieve full Blueprint-compliant scorecard for completed viva."""
     code = code.strip().upper()
     room = VIVAS.get(code)
 
@@ -472,18 +596,72 @@ def get_viva_scorecard(code: str):
         avg_delivery = round(sum(a["delivery"]["fluency_score"] for a in answers) / n, 1)
         avg_total = round(sum(a["total"] for a in answers) / n, 1)
 
+        # Aggregate competency ratings (0 to 100)
+        avg_concept = round(sum(a.get("competencies", {}).get("concept_depth", a["content_pct"]) for a in answers) / n, 1)
+        avg_clarity = round(sum(a.get("competencies", {}).get("clarity", a["delivery"]["fluency_score"]) for a in answers) / n, 1)
+        avg_reasoning = round(sum(a.get("competencies", {}).get("reasoning", a["content_pct"]) for a in answers) / n, 1)
+        avg_confidence = round(sum(a.get("competencies", {}).get("confidence", a["delivery"]["fluency_score"]) for a in answers) / n, 1)
+
+        competencies = {
+            "concept_depth": avg_concept,
+            "clarity": avg_clarity,
+            "reasoning": avg_reasoning,
+            "confidence": avg_confidence
+        }
+
+        # Anti-Cheating & Integrity Audit Status
+        integrity_log = room.get("integrity_log", [])
+        if any(item.get("severity") == "HIGH" for item in integrity_log):
+            integrity_status = "FLAGGED"
+        elif any(item.get("severity") == "MEDIUM" for item in integrity_log):
+            integrity_status = "SUSPICIOUS"
+        else:
+            integrity_status = "CLEAN"
+
+        # Final recommendation
+        if integrity_status == "FLAGGED":
+            recommendation = "REVIEW (Integrity Anomaly)"
+            recommendation_reason = "Multiple proctoring flags detected (tab switching or artificial recital pattern)."
+        elif avg_total >= 80:
+            recommendation = "PASS — Strong"
+            recommendation_reason = "Demonstrated deep conceptual mastery and clear, confident oral reasoning under cross-questioning."
+        elif avg_total >= 60:
+            recommendation = "PASS"
+            recommendation_reason = "Satisfied syllabus baseline requirements with adequate verbal comprehension."
+        else:
+            recommendation = "NEEDS WORK"
+            recommendation_reason = "Conceptual gaps noted in key rubric areas. Recommended for further revision."
+
         band = "Excellent" if avg_total >= 85 else ("Good" if avg_total >= 70 else ("Average" if avg_total >= 55 else "Needs work"))
+
+        # Calculate session duration
+        duration_str = "05 mins 12 secs"
+        try:
+            c_time = datetime.datetime.fromisoformat(room["created_at"])
+            elapsed_sec = int((datetime.datetime.now(datetime.timezone.utc) - c_time).total_seconds())
+            mins, secs = divmod(max(elapsed_sec, 30), 60)
+            duration_str = f"{mins:02d} mins {secs:02d} secs"
+        except Exception:
+            pass
 
         return jsonify({
             "code": room["code"],
+            "candidate_id": room.get("candidate_id", f"ORL-{room['code']}"),
             "subject": room["subject"],
             "topic": room.get("topic", ""),
             "level": room.get("level", "undergraduate"),
             "language": room.get("language", "en"),
+            "duration": duration_str,
+            "overall_score": avg_total,
             "average_total": avg_total,
             "average_content": avg_content,
             "average_delivery": avg_delivery,
             "band": band,
+            "recommendation": recommendation,
+            "recommendation_reason": recommendation_reason,
+            "competencies": competencies,
+            "integrity_status": integrity_status,
+            "integrity_log": integrity_log,
             "answers": answers,
             "created_at": room["created_at"]
         })
@@ -507,9 +685,34 @@ def _persist_viva_room(room: dict) -> None:
     avg_delivery = round(sum(a["delivery"]["fluency_score"] for a in answers) / n, 1)
     avg_total = round(sum(a["total"] for a in answers) / n, 1)
 
+    avg_concept = round(sum(a.get("competencies", {}).get("concept_depth", a["content_pct"]) for a in answers) / n, 1)
+    avg_clarity = round(sum(a.get("competencies", {}).get("clarity", a["delivery"]["fluency_score"]) for a in answers) / n, 1)
+    avg_reasoning = round(sum(a.get("competencies", {}).get("reasoning", a["content_pct"]) for a in answers) / n, 1)
+    avg_confidence = round(sum(a.get("competencies", {}).get("confidence", a["delivery"]["fluency_score"]) for a in answers) / n, 1)
+
+    competencies = {
+        "concept_depth": avg_concept,
+        "clarity": avg_clarity,
+        "reasoning": avg_reasoning,
+        "confidence": avg_confidence
+    }
+
+    integrity_log = room.get("integrity_log", [])
+    if any(item.get("severity") == "HIGH" for item in integrity_log):
+        integrity_status = "FLAGGED"
+    elif any(item.get("severity") == "MEDIUM" for item in integrity_log):
+        integrity_status = "SUSPICIOUS"
+    else:
+        integrity_status = "CLEAN"
+
+    recommendation = "PASS — Strong" if avg_total >= 80 else ("PASS" if avg_total >= 60 else "NEEDS WORK")
+    if integrity_status == "FLAGGED":
+        recommendation = "REVIEW (Integrity Anomaly)"
+
     doc = {
         "_id": room["code"],
         "code": room["code"],
+        "candidate_id": room.get("candidate_id", f"ORL-{room['code']}"),
         "session_id": room["code"],
         "subject": room["subject"],
         "topic": room.get("topic", ""),
@@ -518,6 +721,11 @@ def _persist_viva_room(room: dict) -> None:
         "average_content": avg_content,
         "average_delivery": avg_delivery,
         "average_total": avg_total,
+        "overall_score": avg_total,
+        "recommendation": recommendation,
+        "competencies": competencies,
+        "integrity_status": integrity_status,
+        "integrity_log": integrity_log,
         "answers": answers,
         "questions_count": room["total"],
         "created_at": room["created_at"]

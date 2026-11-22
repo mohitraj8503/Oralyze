@@ -330,7 +330,8 @@ Return only the JSON object."""
                 "text": text,
                 "bloom": bloom,
                 "key_points": kps[:5],
-                "ideal_seconds": ideal_sec
+                "ideal_seconds": ideal_sec,
+                "type": "DYNAMIC"
             })
 
     # If valid questions count is acceptable (allow target_count-1, never fewer than 3)
@@ -491,3 +492,219 @@ Respond ONLY with a valid JSON object matching this schema, with no markdown fen
         logger.warning("[granite] Answer grading failed via Granite, falling back to keyword grader: %s", e)
 
     return _keyword_grade(question, transcript)
+
+
+def detect_scripted_response(
+    transcript: str,
+    latency_sec: float = 0.0,
+    word_count: int = 0
+) -> dict:
+    """Anti-cheating heuristic & semantic detector.
+    
+    Identifies reading from pre-generated AI scripts, prompt-typing delays (5-8s latency
+    followed by rapid textbook answers), and unnatural lexical density.
+    """
+    clean_text = (transcript or "").strip()
+    words = clean_text.split()
+    total_words = len(words) if word_count <= 0 else word_count
+
+    if total_words < 5:
+        return {
+            "is_suspect": False,
+            "risk_level": "CLEAN",
+            "risk_score": 0,
+            "reasons": [],
+            "suggests_probe": False,
+            "lexical_density": 0.0
+        }
+
+    reasons = []
+    risk_score = 0  # 0 to 100
+
+    # 1. Suspicious prompt-typing latency check (4.8s to 9.2s delay before instant recital)
+    if 4.8 <= latency_sec <= 9.2 and total_words >= 15:
+        risk_score += 40
+        reasons.append(f"Prompt-typing delay detected ({latency_sec:.1f}s hesitation before fluent recital)")
+
+    # 2. Textbook & AI-scripted transition markers
+    script_markers = [
+        "furthermore", "moreover", "in conclusion", "to summarize", "crucial aspect",
+        "it is essential to note", "firstly", "secondly", "subsequently", "delve into",
+        "in summary", "pivotal role", "seamlessly", "testament to"
+    ]
+    matched_markers = [m for m in script_markers if m in clean_text.lower()]
+    if matched_markers:
+        risk_score += min(len(matched_markers) * 20, 45)
+        reasons.append(f"Formal written-script markers detected ({', '.join(matched_markers[:3])})")
+
+    # 3. Lexical density (disproportionate number of long academic words)
+    long_words = [w for w in words if len(w) >= 8]
+    lexical_density = round(len(long_words) / max(total_words, 1), 2)
+    if lexical_density >= 0.30 and total_words >= 20:
+        risk_score += 25
+        reasons.append(f"Unusually high written lexical density ({int(lexical_density * 100)}% polysyllabic tokens)")
+
+    # Determine risk level
+    if risk_score >= 60:
+        risk_level = "HIGH"
+    elif risk_score >= 30:
+        risk_level = "MEDIUM"
+    elif risk_score >= 15:
+        risk_level = "LOW"
+    else:
+        risk_level = "CLEAN"
+
+    is_suspect = risk_level in ("HIGH", "MEDIUM")
+    suggests_probe = is_suspect or (risk_score >= 25)
+
+    return {
+        "is_suspect": is_suspect,
+        "risk_level": risk_level,
+        "risk_score": risk_score,
+        "reasons": reasons,
+        "suggests_probe": suggests_probe,
+        "lexical_density": lexical_density
+    }
+
+
+def generate_adaptive_probe(
+    prev_question: dict | str,
+    prev_answer: str,
+    topic: str = "",
+    reason: str = "deepen"
+) -> dict:
+    """Generate a spontaneous 'Why / How / What-If' follow-up probe.
+    
+    Used for cross-examining candidate answers, checking script comprehension,
+    or probing deeper edge cases.
+    """
+    q_text = prev_question.get("text", "") if isinstance(prev_question, dict) else str(prev_question)
+    ans_text = (prev_answer or "").strip()
+
+    # If LLM is available and not in mock mode, attempt dynamic model-generated probe
+    if not Config.MOCK_MODE and Config.IBM_API_KEY:
+        system_prompt = """You are Oralize AI, an expert viva examiner.
+A candidate just answered a question. You must ask ONE concise, spontaneous spoken follow-up counter-question.
+Ask a direct "Why / How / What-If" question testing their genuine understanding of the exact point they made.
+Return ONLY a valid JSON object:
+{
+  "text": "<one single spoken sentence, max 25 words>",
+  "key_points": ["<expected point 1>", "<expected point 2>"]
+}"""
+        user_msg = f"""Original Question: {q_text}
+Candidate's Spoken Answer: "{ans_text}"
+Topic: {topic}
+Probe Intent: {reason} (e.g. verify understanding or explore edge case).
+Produce the single counter-question JSON:"""
+
+        try:
+            raw = chat([
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_msg}
+            ], max_tokens=250, temperature=0.5)
+            parsed = _extract_json(raw)
+            if isinstance(parsed, dict) and parsed.get("text"):
+                return {
+                    "id": f"probe_{int(time.time() * 1000) % 100000}",
+                    "text": str(parsed["text"]).strip(),
+                    "type": "FOLLOW-UP",
+                    "bloom": "analyse",
+                    "key_points": [str(k) for k in parsed.get("key_points", ["practical trade-off", "real-world edge case"])],
+                    "ideal_seconds": 35,
+                    "probe_reason": reason
+                }
+        except Exception as e:
+            logger.warning("[granite] Adaptive probe LLM generation failed, falling back: %s", e)
+
+    # Deterministic context-aware probe fallback
+    ans_lower = ans_text.lower()
+    probe_text = "You noted that key concept—what is a specific edge-case scenario where that mechanism would fail?"
+    key_points = ["edge case limitation", "failure mode", "alternative approach"]
+
+    if "index" in ans_lower or "b+" in ans_lower or "b tree" in ans_lower or "clustered" in ans_lower:
+        probe_text = "You mentioned using an index there—what happens to write throughput and page splits when inserting 10,000 rows per second?"
+        key_points = ["write latency penalty", "page splits", "index maintenance overhead"]
+    elif "acid" in ans_lower or "transaction" in ans_lower or "isolation" in ans_lower:
+        probe_text = "Under high concurrent load, what specific isolation anomaly could still occur with that setup?"
+        key_points = ["phantom read", "dirty read", "locking overhead", "serializability"]
+    elif "deadlock" in ans_lower or "semaphore" in ans_lower or "mutex" in ans_lower:
+        probe_text = "How would you prevent circular wait dynamically in code without locking every resource upfront?"
+        key_points = ["resource ordering", "lock timeout", "banker's algorithm", "try-lock"]
+    elif "tcp" in ans_lower or "udp" in ans_lower or "handshake" in ans_lower:
+        probe_text = "If packet loss suddenly increases to 20%, how does the congestion window scale down?"
+        key_points = ["slow start", "additive decrease", "retransmission timeout", "throughput drop"]
+    elif "bfs" in ans_lower or "dfs" in ans_lower or "tree" in ans_lower or "graph" in ans_lower:
+        probe_text = "If the graph contains cycles or deep paths, how does memory consumption compare between BFS and DFS?"
+        key_points = ["call stack overflow in DFS", "queue memory in wide BFS", "visited set"]
+    elif reason == "script_check":
+        probe_text = "Can you briefly walk me through a real project or situation where you had to debug that exact trade-off?"
+        key_points = ["personal implementation experience", "trade-off explanation", "practical troubleshooting"]
+
+    return {
+        "id": f"probe_{int(time.time() * 1000) % 100000}",
+        "text": probe_text,
+        "type": "FOLLOW-UP",
+        "bloom": "analyse",
+        "key_points": key_points,
+        "ideal_seconds": 35,
+        "probe_reason": reason
+    }
+
+
+def build_hybrid_questions(
+    fixed_questions: list[str | dict] | None,
+    dynamic_questions: list[dict],
+    candidate_seed: str = ""
+) -> list[dict]:
+    """Combine host-configured fixed baseline questions with seeded unique dynamic questions.
+    
+    Guarantees that fixed questions come first with type 'FIXED', followed by candidate-specific
+    fresh dynamic questions with type 'DYNAMIC'.
+    """
+    queue: list[dict] = []
+
+    # 1. Process fixed baseline questions
+    if fixed_questions:
+        for idx, item in enumerate(fixed_questions):
+            if isinstance(item, dict):
+                queue.append({
+                    "id": item.get("id") or f"fix_{idx+1}",
+                    "text": item.get("text", ""),
+                    "bloom": item.get("bloom", "remember"),
+                    "key_points": item.get("key_points", ["identification", "context"]),
+                    "ideal_seconds": item.get("ideal_seconds", 30),
+                    "type": "FIXED"
+                })
+            elif isinstance(item, str) and item.strip():
+                queue.append({
+                    "id": f"fix_{idx+1}",
+                    "text": item.strip(),
+                    "bloom": "remember",
+                    "key_points": ["candidate identity", "background introduction"],
+                    "ideal_seconds": 30,
+                    "type": "FIXED"
+                })
+
+    # 2. Process dynamic questions (optionally seeded by candidate ID)
+    dyn_copy = [dict(q) for q in dynamic_questions]
+    if candidate_seed and len(dyn_copy) > 1:
+        # Deterministic rotation / permutation based on candidate seed hash
+        seed_hash = sum(ord(c) for c in str(candidate_seed))
+        offset = seed_hash % len(dyn_copy)
+        dyn_copy = dyn_copy[offset:] + dyn_copy[:offset]
+
+    for idx, q in enumerate(dyn_copy):
+        queue.append({
+            "id": q.get("id") or f"dyn_{idx+1}",
+            "text": q.get("text", ""),
+            "bloom": q.get("bloom", "understand"),
+            "key_points": q.get("key_points", []),
+            "ideal_seconds": q.get("ideal_seconds", 40),
+            "type": "DYNAMIC"
+        })
+
+    # Normalize sequential index
+    for i, item in enumerate(queue):
+        item["index"] = i
+
+    return queue

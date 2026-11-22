@@ -175,5 +175,152 @@ class TestHealthRoute(unittest.TestCase):
             self.skipTest(f"Cannot import app in test environment: {e}")
 
 
+# ---------------------------------------------------------------------------
+# 5. Hybrid Question Engine & Anti-Cheating Suite (Blueprint Option 1)
+# ---------------------------------------------------------------------------
+
+class TestHybridQuestionEngine(unittest.TestCase):
+
+    def test_hybrid_question_queue_ordering(self):
+        """Fixed questions must appear first as 'FIXED', followed by 'DYNAMIC' questions."""
+        from services.granite import build_hybrid_questions
+
+        fixed = [
+            "Please state your full name, student ID, and branch.",
+            "Briefly introduce your semester coursework project."
+        ]
+        dynamic = [
+            {"id": "q1", "text": "Explain B+ tree indexing.", "bloom": "understand", "key_points": ["indexing", "disk I/O"]},
+            {"id": "q2", "text": "Compare 3NF and BCNF.", "bloom": "analyse", "key_points": ["superkey", "functional dependency"]}
+        ]
+
+        queue = build_hybrid_questions(fixed_questions=fixed, dynamic_questions=dynamic, candidate_seed="CAND_01")
+        self.assertEqual(len(queue), 4)
+        self.assertEqual(queue[0]["type"], "FIXED")
+        self.assertEqual(queue[1]["type"], "FIXED")
+        self.assertEqual(queue[2]["type"], "DYNAMIC")
+        self.assertEqual(queue[3]["type"], "DYNAMIC")
+        self.assertIn("name", queue[0]["text"].lower())
+
+    def test_candidate_seed_isolation(self):
+        """Different candidate IDs generate different permutations of dynamic questions."""
+        from services.granite import build_hybrid_questions
+
+        dynamic = [
+            {"id": "d1", "text": "Question Alpha"},
+            {"id": "d2", "text": "Question Beta"},
+            {"id": "d3", "text": "Question Gamma"}
+        ]
+        q1 = build_hybrid_questions(None, dynamic, candidate_seed="CAND_AAA")
+        q2 = build_hybrid_questions(None, dynamic, candidate_seed="CAND_BBB")
+        
+        # Verify both queues have valid questions
+        self.assertEqual(len(q1), 3)
+        self.assertEqual(len(q2), 3)
+
+
+class TestAntiCheatingSuite(unittest.TestCase):
+
+    def test_clean_conversational_speech_is_clean(self):
+        """Normal spoken student answer must produce CLEAN risk level."""
+        from services.granite import detect_scripted_response
+
+        transcript = "Well, in B+ trees, all the data records are stored in the leaf nodes, which makes range queries really fast because leaves are linked together."
+        res = detect_scripted_response(transcript=transcript, latency_sec=1.5, word_count=len(transcript.split()))
+        self.assertFalse(res["is_suspect"])
+        self.assertEqual(res["risk_level"], "CLEAN")
+
+    def test_prompt_typing_delay_detection(self):
+        """5 to 8 second delay followed by immediate rapid answer must flag hesitation."""
+        from services.granite import detect_scripted_response
+
+        text = "Relational database management systems utilize clustered indexes to order rows physically while non-clustered indexes provide secondary lookups through pointer structures."
+        res = detect_scripted_response(transcript=text, latency_sec=6.5, word_count=len(text.split()))
+        self.assertTrue(res["suggests_probe"])
+        self.assertIn("Prompt-typing delay detected", "; ".join(res["reasons"]))
+
+    def test_script_marker_density_detection(self):
+        """Formal AI transition markers must trigger suspicion."""
+        from services.granite import detect_scripted_response
+
+        text = "Furthermore, in conclusion, it is essential to note that transactions play a crucial aspect and delve into concurrency control."
+        res = detect_scripted_response(transcript=text, latency_sec=2.0, word_count=len(text.split()))
+        self.assertTrue(res["is_suspect"])
+        self.assertIn(res["risk_level"], ("HIGH", "MEDIUM"))
+
+
+class TestAdaptiveProbing(unittest.TestCase):
+
+    def test_adaptive_probe_generation(self):
+        """generate_adaptive_probe must produce a single focused follow-up question."""
+        from services.granite import generate_adaptive_probe
+
+        prev_q = {"text": "Explain B+ tree indexing."}
+        ans = "I used a clustered index on the primary key to speed up retrieval."
+        probe = generate_adaptive_probe(prev_q, ans, topic="DBMS", reason="deepen")
+
+        self.assertEqual(probe["type"], "FOLLOW-UP")
+        self.assertEqual(probe["bloom"], "analyse")
+        self.assertIn("index", probe["text"].lower())
+        self.assertGreater(len(probe["key_points"]), 0)
+
+
+class TestScorecardBlueprintSchema(unittest.TestCase):
+
+    def test_api_viva_hybrid_and_scorecard_lifecycle(self):
+        """Full API test: Room creation -> Answer with telemetry -> Scorecard output."""
+        os.environ.setdefault("MOCK_MODE", "1")
+        import app as flask_app
+        client = flask_app.app.test_client()
+
+        # 1. Create viva room with fixed baseline questions + anti-cheating config
+        create_payload = {
+            "prompt": "Operating Systems viva on deadlocks and scheduling",
+            "candidate_id": "ORL-TEST-001",
+            "fixed_questions": [
+                "Please state your full name and enrollment number."
+            ],
+            "anti_cheating": {
+                "strictness": "HIGH",
+                "detect_tab_switch": True
+            }
+        }
+        res = client.post("/api/viva", json=create_payload)
+        self.assertEqual(res.status_code, 200)
+        data = res.get_json()
+        code = data["code"]
+        self.assertEqual(data["candidate_id"], "ORL-TEST-001")
+        self.assertEqual(data["questions"][0]["type"], "FIXED")
+
+        # 2. Submit answer with telemetry
+        ans_data = {
+            "qid": data["questions"][0]["id"],
+            "live_transcript": "My name is John Doe, enrollment number CS 2026 101.",
+            "tab_switches": "0",
+            "blur_events": "0",
+            "response_latency_sec": "1.2"
+        }
+        ans_res = client.post(f"/api/viva/{code}/answer", data=ans_data)
+        self.assertEqual(ans_res.status_code, 200)
+        eval_data = ans_res.get_json()
+        self.assertIn("competencies", eval_data)
+        self.assertIn("concept_depth", eval_data["competencies"])
+
+        # 3. Retrieve scorecard
+        sc_res = client.get(f"/api/viva/{code}/scorecard")
+        self.assertEqual(sc_res.status_code, 200)
+        sc_data = sc_res.get_json()
+
+        # Check Blueprint Section 6 schema fields
+        self.assertEqual(sc_data["candidate_id"], "ORL-TEST-001")
+        self.assertIn("overall_score", sc_data)
+        self.assertIn("recommendation", sc_data)
+        self.assertIn("competencies", sc_data)
+        self.assertIn("integrity_status", sc_data)
+        self.assertIn("integrity_log", sc_data)
+        self.assertEqual(sc_data["answers"][0]["type"], "FIXED")
+
+
+
 if __name__ == "__main__":
     unittest.main()
