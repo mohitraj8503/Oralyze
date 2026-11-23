@@ -904,12 +904,12 @@
 
         <div class="w-full bg-surface-container-lowest rounded-[22px] p-8 shadow-[0_2px_8px_rgba(13,21,38,0.05),0_16px_32px_rgba(13,21,38,0.06)] flex flex-col items-center">
           <div class="flex gap-2 sm:gap-3 justify-center mb-8" id="codeBoxesWrap">
-            <input type="text" class="code-box-input" maxlength="1" autofocus>
-            <input type="text" class="code-box-input" maxlength="1">
-            <input type="text" class="code-box-input" maxlength="1">
-            <input type="text" class="code-box-input" maxlength="1">
-            <input type="text" class="code-box-input" maxlength="1">
-            <input type="text" class="code-box-input" maxlength="1">
+            <input type="text" class="code-box-input" maxlength="6" autofocus>
+            <input type="text" class="code-box-input" maxlength="6">
+            <input type="text" class="code-box-input" maxlength="6">
+            <input type="text" class="code-box-input" maxlength="6">
+            <input type="text" class="code-box-input" maxlength="6">
+            <input type="text" class="code-box-input" maxlength="6">
           </div>
 
           <button type="button" id="btnStudentJoin" class="w-full h-14 rounded-[14px] bg-primary text-on-primary text-[17px] font-semibold flex items-center justify-center gap-2 hover:bg-primary-container transition-all active:scale-[0.99] shadow-sm" onclick="submitJoinCode()">
@@ -3578,23 +3578,61 @@
       const wrap = document.getElementById("codeBoxesWrap");
       if (!wrap) return;
       const inputs = wrap.querySelectorAll("input");
+
+      function fillFromIndex(startIndex, text) {
+        const clean = text.replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
+        if (!clean) return;
+        let start = startIndex;
+        if (clean.length >= inputs.length) start = 0;
+        for (let i = 0; i < clean.length && (start + i) < inputs.length; i++) {
+          inputs[start + i].value = clean[i];
+        }
+        const nextIdx = Math.min(start + clean.length, inputs.length - 1);
+        inputs[nextIdx].focus();
+      }
+
       inputs.forEach((inp, idx) => {
         inp.value = "";
+
+        inp.onpaste = (e) => {
+          e.preventDefault();
+          const pasteData = (e.clipboardData || window.clipboardData)?.getData('text') || '';
+          fillFromIndex(idx, pasteData);
+        };
+
         inp.oninput = (e) => {
-          const val = e.target.value.toUpperCase();
-          e.target.value = val;
-          if (val && idx < inputs.length - 1) {
+          const raw = e.target.value || '';
+          const clean = raw.replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
+          if (clean.length > 1) {
+            fillFromIndex(idx, clean);
+            return;
+          }
+          e.target.value = clean;
+          if (clean && idx < inputs.length - 1) {
             inputs[idx + 1].focus();
           }
         };
+
         inp.onkeydown = (e) => {
           if (e.key === "Backspace" && !inp.value && idx > 0) {
+            inputs[idx - 1].value = "";
             inputs[idx - 1].focus();
+          } else if (e.key === "ArrowLeft" && idx > 0) {
+            inputs[idx - 1].focus();
+          } else if (e.key === "ArrowRight" && idx < inputs.length - 1) {
+            inputs[idx + 1].focus();
           } else if (e.key === "Enter") {
             submitJoinCode();
           }
         };
       });
+
+      wrap.onpaste = (e) => {
+        e.preventDefault();
+        const pasteData = (e.clipboardData || window.clipboardData)?.getData('text') || '';
+        fillFromIndex(0, pasteData);
+      };
+
       if (inputs.length > 0) inputs[0].focus();
     }
 
