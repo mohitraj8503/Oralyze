@@ -24,7 +24,8 @@
     <img src="https://img.shields.io/badge/Python-3.12-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python 3.12" />
     <img src="https://img.shields.io/badge/Framework-Flask%203.0-000000?style=flat-square&logo=flask&logoColor=white" alt="Flask" />
     <img src="https://img.shields.io/badge/LLM-IBM%20Granite%203.3%208B%20Instruct-1261FE?style=flat-square&logo=ibm&logoColor=white" alt="IBM Granite" />
-    <img src="https://img.shields.io/badge/Speech%20AI-Watson%20STT%20%2B%20TTS-1261FE?style=flat-square&logo=ibm&logoColor=white" alt="Watson Speech" />
+    <img src="https://img.shields.io/badge/Voice%20AI-Sarvam%20AI%20(Oralyze%20Voice)-6366F1?style=flat-square" alt="Sarvam AI" />
+    <img src="https://img.shields.io/badge/Fallback%20Speech-Watson%20STT%20%2B%20TTS-1261FE?style=flat-square&logo=ibm&logoColor=white" alt="Watson Speech" />
     <img src="https://img.shields.io/badge/Database-IBM%20Cloudant%20NoSQL-1261FE?style=flat-square&logo=ibm&logoColor=white" alt="IBM Cloudant" />
     <img src="https://img.shields.io/badge/Frontend-TailwindCSS%20%2B%20Web%20Audio%20API-38BDF8?style=flat-square&logo=tailwindcss&logoColor=white" alt="Frontend" />
     <img src="https://img.shields.io/badge/Tests-PyTest%20Passing-0F9D6E?style=flat-square&logo=pytest&logoColor=white" alt="Tests" />
@@ -62,22 +63,32 @@ Most college evaluation projects are standard CRUD apps (forms, attendance, dash
 <table align="center" width="100%">
   <tr>
     <td width="50%" align="center">
-      <a href="docs/screenshots/01-teacher-setup.png"><img src="docs/screenshots/01-teacher-setup.png" alt="Teacher Prompt Setup" width="100%" /></a>
-      <p><strong>1. Teacher Prompt & Question Generation</strong><br /><em>Teacher inputs prompt; Granite 3.3 outputs questions with Bloom levels and key rubrics.</em></p>
+      <a href="docs/screenshots/01-landing-home.png"><img src="docs/screenshots/01-landing-home.png" alt="Oralyze Landing Home" width="100%" /></a>
+      <p><strong>1. Landing & Assessment Portal</strong><br /><em>Host or student navigation with active mode selection and Oralyze Voice attribution.</em></p>
     </td>
     <td width="50%" align="center">
-      <a href="docs/screenshots/02-desktop-live-viva.png"><img src="docs/screenshots/02-desktop-live-viva.png" alt="Live Spoken Examination" width="100%" /></a>
-      <p><strong>2. Live Audio Viva & Real-Time Transcript</strong><br /><em>Watson TTS speaks question; microphone records candidate with live acoustic waveform.</em></p>
+      <a href="docs/screenshots/02-teacher-setup.png"><img src="docs/screenshots/02-teacher-setup.png" alt="Teacher Prompt Setup" width="100%" /></a>
+      <p><strong>2. Instructor Prompt & Question Generation</strong><br /><em>Free-text curriculum prompt; IBM Granite 3.3 outputs structured questions with Bloom rubrics.</em></p>
     </td>
   </tr>
   <tr>
     <td width="50%" align="center">
-      <a href="docs/screenshots/03-desktop-evaluation.png"><img src="docs/screenshots/03-desktop-evaluation.png" alt="Evaluation Result" width="100%" /></a>
-      <p><strong>3. Content (70%) & Delivery (30%) Scoring</strong><br /><em>Granite scores technical accuracy; timing engine grades speaking pace and hesitation pauses.</em></p>
+      <a href="docs/screenshots/03-student-join.png"><img src="docs/screenshots/03-student-join.png" alt="Student Join Room" width="100%" /></a>
+      <p><strong>3. Candidate Join Room</strong><br /><em>6-box room code input with auto-paste distribution and instant audio check.</em></p>
     </td>
     <td width="50%" align="center">
-      <a href="docs/screenshots/04-dashboard.png"><img src="docs/screenshots/04-dashboard.png" alt="Teacher Dashboard" width="100%" /></a>
-      <p><strong>4. Classroom Analytics & Scorecards</strong><br /><em>Instructor dashboard with aggregated session performance and printable A4 reports.</em></p>
+      <a href="docs/screenshots/04-live-examination.png"><img src="docs/screenshots/04-live-examination.png" alt="Live Spoken Examination" width="100%" /></a>
+      <p><strong>4. Live Voice Viva & Real-Time Transcript</strong><br /><em>Sarvam Bulbul speaks question; Saaras STT captures spoken answer with acoustic word timestamps.</em></p>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" align="center">
+      <a href="docs/screenshots/05-dashboard.png"><img src="docs/screenshots/05-dashboard.png" alt="Classroom Analytics Dashboard" width="100%" /></a>
+      <p><strong>5. Classroom Analytics & Session Log</strong><br /><em>Instructor dashboard with aggregated session performance and Cloudant records.</em></p>
+    </td>
+    <td width="50%" align="center">
+      <a href="docs/screenshots/06-about-developer.png"><img src="docs/screenshots/06-about-developer.png" alt="Meet the Developer" width="100%" /></a>
+      <p><strong>6. Meet the Developer & Verified Credentials</strong><br /><em>Interactive resume viewer, live website links, technology competencies, and direct contact.</em></p>
     </td>
   </tr>
 </table>
@@ -88,39 +99,45 @@ Most college evaluation projects are standard CRUD apps (forms, attendance, dash
 
 ```mermaid
 flowchart TD
-    subgraph TeacherStage["1. Instructor Viva Room Setup"]
-        T1["Teacher Natural Language Prompt"] --> T2["IBM Granite 3.3 8B Instruct"]
-        T2 --> T3["Curriculum Question Bank & Rubrics"]
-        T3 --> T4["Unique 6-Character Access Code"]
+    subgraph HostStage["1. Instructor / Recruiter Setup"]
+        T1["Natural Language Subject Prompt"] --> T2["IBM Granite 3.3 8B Instruct"]
+        T2 --> T3["Curriculum Question Bank & Bloom Rubrics"]
+        T3 --> T4["Unique 6-Character Room Code"]
     end
 
-    subgraph CandidateStage["2. Candidate Voice Examination"]
+    subgraph VoiceStage["2. Dual-Tier Spoken Assessment Engine"]
         T4 --> C1["Candidate Joins Room"]
-        C1 --> C2["Watson Neural Text-to-Speech"]
-        C2 --> C3["Candidate Hears Spoken Question"]
+        C1 --> C2{"Voice Provider Router"}
+        C2 -->|"Primary (Indian Accents)"| V1["Oralyze Voice (Sarvam Bulbul v3)"]
+        C2 -->|"Secondary Fallback"| V2["IBM Watson Text-to-Speech"]
+        C2 -->|"Client Offline"| V3["Browser SpeechSynthesis"]
+        V1 & V2 & V3 --> C3["Candidate Hears Spoken Question"]
         C3 --> C4["Browser Audio Capture (Web Audio API)"]
-        C4 --> C5["Watson Speech-to-Text"]
+        C4 --> S1{"STT Audio Router"}
+        S1 -->|"Primary (Word Timings)"| S2["Sarvam Saaras v3 STT"]
+        S1 -->|"Secondary Fallback"| S3["IBM Watson STT"]
+        S1 -->|"Client Fallback"| S4["Browser Web Speech API"]
     end
 
-    subgraph EvaluationStage["3. Real-Time Dual Engine Evaluation"]
-        C5 --> E1["Verbatim Spoken Transcript"]
-        C5 --> E2["Word Timestamps & Acoustic Pauses"]
-        E1 --> E3["Granite Rubric Grader (70% Content)"]
-        E2 --> E4["Fluency Timing Engine (30% Delivery)"]
-        E3 --> E5["Composite Viva Scorecard"]
+    subgraph EvalStage["3. Dual-Engine Real-Time Evaluation"]
+        S2 & S3 & S4 --> E1["Verbatim Spoken Transcript"]
+        S2 & S3 & S4 --> E2["Word Timestamps & Acoustic Pauses"]
+        E1 --> E3["IBM Granite Rubric Grader\n(70% Technical Depth)"]
+        E2 --> E4["Fluency Timing Engine\n(30% Delivery & WPM)"]
+        E3 --> E5["Composite Performance Scorecard"]
         E4 --> E5
     end
 
-    subgraph StorageStage["4. Persistence & Analytics"]
-        E5 --> S1[("IBM Cloudant NoSQL Store")]
-        S1 --> S2["Live Teacher Classroom Monitor"]
-        S1 --> S3["Printable A4 Academic Report"]
+    subgraph StorageStage["4. Persistence & Live Analytics"]
+        E5 --> DB1[("IBM Cloudant NoSQL Store")]
+        DB1 --> M1["Teacher Real-Time Monitor"]
+        DB1 --> M2["Printable A4 Academic Scorecard"]
     end
 
-    style TeacherStage fill:#F6F7F9,stroke:#3B5BFF,stroke-width:2px
-    style CandidateStage fill:#FFFFFF,stroke:#3B5BFF,stroke-width:2px
-    style EvaluationStage fill:#EDF1FF,stroke:#3B5BFF,stroke-width:2px
-    style StorageStage fill:#F6F7F9,stroke:#0F9D6E,stroke-width:2px
+    style HostStage fill:#F8FAFC,stroke:#3B82F6,stroke-width:2px
+    style VoiceStage fill:#EEF2FF,stroke:#6366F1,stroke-width:2px
+    style EvalStage fill:#F0FDF4,stroke:#10B981,stroke-width:2px
+    style StorageStage fill:#FAF5FF,stroke:#8B5CF6,stroke-width:2px
 ```
 
 ### Complete Sequence Dataflow
@@ -128,16 +145,35 @@ flowchart TD
 ```mermaid
 sequenceDiagram
     autonumber
-    actor Teacher as Instructor
-    participant Web as Oralyze Web App
-    participant Granite as IBM Granite 3.3
-    participant Speech as Watson STT & TTS
-    participant DB as IBM Cloudant
+    actor Host as Instructor / Recruiter
+    participant Web as Oralyze Web Portal
+    participant Server as Flask Backend Engine
+    participant Granite as IBM Granite 3.3 (watsonx.ai)
+    participant Voice as Oralyze Voice (Sarvam AI)
+    participant Watson as IBM Watson Speech (Fallback)
+    participant Cloudant as IBM Cloudant NoSQL
     actor Student as Candidate
 
-    Teacher->>Web: Input topic prompt (e.g. DBMS Indexing)
-    Web->>Granite: POST /v1/generate (Bloom rubric schema)
-    Granite-->>Web: Structured questions with key points & ideal duration
+    Host->>Web: Input topic prompt (e.g. DBMS Indexing & Transactions)
+    Web->>Server: POST /api/viva (prompt, difficulty, language)
+    Server->>Granite: Generate questions with Bloom taxonomy & key rubrics
+    Granite-->>Server: Return structured JSON questions + rubrics
+    Server->>Voice: POST /api/voice/tts (synthesize question 1 audio)
+    Voice-->>Server: Return audio bytes (SHA-1 cached)
+    Server-->>Web: Room created with 6-char code (e.g. VK6XRZ)
+    
+    Student->>Web: Join with 6-char code
+    Web->>Voice: Play question 1 spoken audio
+    Student->>Web: Speaks answer into microphone
+    Web->>Server: POST /api/voice/stt (multipart audio)
+    Server->>Voice: Transcribe audio with acoustic timestamps
+    Voice-->>Server: Verbatim transcript + word timestamps [{word, start, end}]
+    
+    Server->>Granite: Evaluate answer against rubric (70% Content)
+    Server->>Server: Calculate speaking rate, fillers & pauses (30% Fluency)
+    Server->>Cloudant: Persist question evaluation & integrity logs
+    Server-->>Web: In-place feedback (verified checkmark / rubric breakdown)
+    Server-->>Host: Real-time candidate live monitor update
     Teacher->>Web: Launch Room (e.g. A7K2QX)
     Student->>Web: Join room with 6-char code
     Web->>Speech: Synthesize question text (en-IN/hi-IN)
