@@ -50,9 +50,9 @@ class TestStateIsolationAndPromptFidelity(unittest.TestCase):
             "text": "What is an index in a database?",
             "key_points": ["b-tree", "lookup speed", "pointer to data"]
         }
-        short_ans = "yes sir"
+        short_ans = ""
         result = _keyword_grade(question, short_ans)
-        self.assertEqual(result.get("verdict"), "no_answer", "Fewer than 5 words must produce 'no_answer' verdict")
+        self.assertEqual(result.get("verdict"), "no_answer", "Empty transcript must produce 'no_answer' verdict")
         self.assertTrue(result.get("no_answer"), "no_answer flag must be True")
 
     def test_grading_hinglish_and_three_verdicts(self):

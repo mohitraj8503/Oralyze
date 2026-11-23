@@ -34,6 +34,14 @@ class Config:
     # Watson Text to Speech (TTS)
     TTS_URL = os.getenv("TTS_URL", "").rstrip("/")
 
+    # Sarvam AI Voice Configuration
+    SARVAM_API_KEY = os.getenv("SARVAM_API_KEY", "").strip()
+    SARVAM_DAILY_CALL_LIMIT = int(os.getenv("SARVAM_DAILY_CALL_LIMIT", "300"))
+    SARVAM_TTS_MODEL = os.getenv("SARVAM_TTS_MODEL", "bulbul:v3").strip()
+    SARVAM_STT_MODEL = os.getenv("SARVAM_STT_MODEL", "saaras:v3").strip()
+    SARVAM_TRANSLATE_MODEL = os.getenv("SARVAM_TRANSLATE_MODEL", "mayura:v1").strip()
+    SARVAM_DEFAULT_SPEAKER = os.getenv("SARVAM_DEFAULT_SPEAKER", "shubh").strip()
+
     # Cloudant NoSQL Database
     CLOUDANT_URL = os.getenv("CLOUDANT_URL", "").rstrip("/")
     CLOUDANT_DB = os.getenv("CLOUDANT_DB", "oralyze_scorecards").strip()

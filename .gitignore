@@ -1,4 +1,6 @@
 .env
+.env.*
+*.pem
 __pycache__/
 *.py[cod]
 *$py.class
@@ -6,3 +8,4 @@ data/scorecards.json
 _ref/
 *.mp3
 .pytest_cache/
+

@@ -19,12 +19,13 @@ GET  /api/health               -> system status
 """
 import base64
 import datetime
+import io
 import logging
 import os
 import random
 import string
 import uuid
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, jsonify, request, send_from_directory, send_file
 from config import Config
 from services.fluency import analyze_fluency
 from services.granite import (
@@ -36,6 +37,7 @@ from services.granite import (
     build_hybrid_questions,
 )
 from services.speech import synthesize, transcribe
+from services import voice
 from services import store
 
 logging.basicConfig(
@@ -94,7 +96,14 @@ def _generate_code() -> str:
 
 
 def _get_or_synthesize_audio(text: str, language: str) -> tuple[str, str]:
-    """Synthesize question text to base64 MP3."""
+    """Synthesize question text to base64 audio (Sarvam -> Watson fallback)."""
+    if Config.SARVAM_API_KEY and not Config.MOCK_MODE:
+        try:
+            _, b64, _ = voice.synthesize_speech(text, language_code=language)
+            if b64:
+                return b64, "audio/wav"
+        except Exception as e:
+            logger.warning("[viva] Voice synthesis fallback: %s", e)
     mp3_bytes = synthesize(text, language=language)
     b64 = base64.b64encode(mp3_bytes).decode("ascii")
     return b64, "audio/mp3"
@@ -374,12 +383,24 @@ def submit_viva_answer(code: str):
         audio_bytes = audio_file.read()
         content_type = audio_file.content_type or "audio/webm"
 
-    # 1. Watson STT (with fallback)
-    try:
-        stt_result = transcribe(audio_bytes=audio_bytes, content_type=content_type, language=language)
-    except Exception as e:
-        logger.error("[viva] STT error: %s", e)
-        stt_result = {"transcript": "", "words": []}
+    # 1. Primary STT: Sarvam Saaras -> Watson STT fallback -> browser live_transcript fallback
+    stt_result = {"transcript": "", "words": []}
+    if Config.SARVAM_API_KEY and not Config.MOCK_MODE and audio_bytes:
+        try:
+            stt_result = voice.transcribe_audio(
+                audio_bytes=audio_bytes,
+                language=language,
+                filename=audio_file.filename if audio_file else "audio.webm"
+            )
+        except Exception as e:
+            logger.warning("[viva] Voice STT fallback: %s", e)
+
+    if not stt_result.get("transcript"):
+        try:
+            stt_result = transcribe(audio_bytes=audio_bytes, content_type=content_type, language=language)
+        except Exception as e:
+            logger.error("[viva] STT fallback error: %s", e)
+            stt_result = {"transcript": "", "words": []}
 
     transcript = stt_result.get("transcript", "").strip()
     words = stt_result.get("words", [])
@@ -772,6 +793,115 @@ def get_dashboard():
         })
 
     return jsonify({"sessions": clean_sessions})
+
+
+# ==========================================
+# Oralyze Voice Layer Proxy Endpoints (Sarvam AI)
+# ==========================================
+
+@app.route("/api/voice/health", methods=["GET"])
+def voice_health():
+    """Health check endpoint strictly returning provider status without leaking secrets."""
+    return jsonify(voice.get_health())
+
+
+@app.route("/api/voice/usage", methods=["GET"])
+def voice_usage():
+    """Usage metrics endpoint returning call counts, cache hit rate, and estimated spend."""
+    return jsonify(voice.get_usage())
+
+
+@app.route("/api/voice/stt", methods=["POST"])
+def voice_stt_proxy():
+    """Proxy STT to Sarvam Saaras model with word timings."""
+    ip = request.remote_addr or "127.0.0.1"
+    if not voice.check_rate_limit(ip):
+        return jsonify({"error": "rate_limit_exceeded"}), 429
+
+    audio_file = request.files.get("audio") or request.files.get("file")
+    if not audio_file:
+        return jsonify({"transcript": "", "error": "stt_failed"}), 200
+
+    audio_bytes = audio_file.read()
+    if len(audio_bytes) > 10 * 1024 * 1024:
+        return jsonify({"transcript": "", "error": "stt_failed"}), 200
+
+    language = request.form.get("language", "auto")
+    filename = audio_file.filename or "audio.webm"
+    result = voice.transcribe_audio(audio_bytes=audio_bytes, language=language, filename=filename)
+    return jsonify(result), 200
+
+
+@app.route("/api/voice/tts", methods=["POST"])
+def voice_tts_proxy():
+    """Proxy TTS to Sarvam Bulbul model with sha1 caching."""
+    ip = request.remote_addr or "127.0.0.1"
+    if not voice.check_rate_limit(ip):
+        return jsonify({"error": "rate_limit_exceeded"}), 429
+
+    data = request.get_json(silent=True) or {}
+    text = str(data.get("text", "")).strip()[:1000]
+    if not text:
+        return jsonify({"error": "empty_text", "audio_b64": ""}), 200
+
+    language_code = data.get("language_code", "en-IN")
+    speaker = data.get("speaker")
+    pace = float(data.get("pace", 1.0) or 1.0)
+
+    audio_bytes, audio_b64, cached = voice.synthesize_speech(
+        text=text,
+        language_code=language_code,
+        speaker=speaker,
+        pace=pace
+    )
+
+    if not audio_bytes:
+        return jsonify({"error": "tts_failed", "audio_b64": ""}), 200
+
+    # If client requests JSON or sets format=json
+    if request.args.get("format") == "json" or request.headers.get("Accept") == "application/json":
+        return jsonify({
+            "audio_b64": audio_b64,
+            "provider": "sarvam",
+            "cached": cached
+        }), 200
+
+    return send_file(io.BytesIO(audio_bytes), mimetype="audio/wav")
+
+
+@app.route("/api/voice/translate", methods=["POST"])
+def voice_translate_proxy():
+    """Proxy translation between Indian languages via Sarvam Mayura model."""
+    ip = request.remote_addr or "127.0.0.1"
+    if not voice.check_rate_limit(ip):
+        return jsonify({"error": "rate_limit_exceeded"}), 429
+
+    data = request.get_json(silent=True) or {}
+    text = str(data.get("text", "")).strip()[:1000]
+    source_lang = data.get("source_language_code", "en-IN")
+    target_lang = data.get("target_language_code", "hi-IN")
+
+    result = voice.translate_text(text, source_language_code=source_lang, target_language_code=target_lang)
+    return jsonify(result), 200
+
+
+@app.route("/api/voice/lid", methods=["POST"])
+def voice_lid_proxy():
+    """Proxy language identification via Sarvam Text-LID."""
+    ip = request.remote_addr or "127.0.0.1"
+    if not voice.check_rate_limit(ip):
+        return jsonify({"error": "rate_limit_exceeded"}), 429
+
+    data = request.get_json(silent=True) or {}
+    text = str(data.get("text", "")).strip()[:1000]
+
+    result = voice.identify_language(text)
+    return jsonify(result), 200
+
+
+# Boot announcement (Section 0)
+_key_status = "present" if Config.SARVAM_API_KEY else "missing"
+print(f"voice=sarvam key={_key_status}")
 
 
 if __name__ == "__main__":

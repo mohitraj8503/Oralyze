@@ -49,8 +49,8 @@
       return graderCache.get(cacheKey);
     }
 
-    // Section 3 / Fix B: Transcripts with fewer than 5 words must be 'no_answer'
-    if (words.length < 5) {
+    // Only a truly empty transcript is 'no_answer'. A short but real answer must be graded.
+    if (words.length < 2) {
       const noAnsResult = {
         score: 0.0,
         verdict: 'no_answer',
@@ -63,6 +63,20 @@
       };
       graderCache.set(cacheKey, noAnsResult);
       return noAnsResult;
+    }
+
+    const qTextLower = String(question.text || '').toLowerCase();
+    const isIdentityQ =
+      /(full name|your name|roll (number|no)|enrol?ment|introduce yourself|your background|which branch|your branch)/.test(qTextLower) ||
+      String(question.type || '').toLowerCase() === 'fixed';
+    if (isIdentityQ && words.length >= 3) {
+      const identityResult = {
+        score: 8.0, verdict: 'correct', no_answer: false, source: 'identity',
+        correct_points: keyPoints, missing_points: [],
+        feedback: 'Identity details recorded.', ideal_answer: ''
+      };
+      graderCache.set(cacheKey, identityResult);
+      return identityResult;
     }
 
     const correctPoints = [];
@@ -114,6 +128,14 @@
       }
       source = 'heuristic';
     }
+
+    const STOPWORDS = ['what','when','where','which','while','would','could','should','about','explain','describe','difference','between','there','their','these','those','does','your','from','with','that','this','have','will','more','than','into','also','used','using','give','example','real','world'];
+    const qTopicTokens = String(question.text || '')
+      .toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/)
+      .filter(w => w.length > 4 && STOPWORDS.indexOf(w) === -1);
+    let topicHits = 0;
+    for (const t of qTopicTokens) { if (clean.indexOf(t) !== -1) topicHits++; }
+    if (topicHits >= 1 && score < 4.0) { score = 4.0; }
 
     // Three verdicts, not two: correct (>= 7.0), partial (4.0 - 6.9), wrong (< 4.0)
     let verdict = 'wrong';
@@ -215,8 +237,8 @@
     if (totalWords < 5) {
       return {
         is_suspect: false,
-        risk_level: 'CLEAN',
-        risk_score: 0,
+        riskLevel: 'CLEAN',
+        riskScore: 0,
         reasons: [],
         suggests_probe: false,
         lexical_density: 0.0
@@ -262,8 +284,8 @@
 
     return {
       is_suspect: isSuspect,
-      risk_level: riskLevel,
-      risk_score: riskScore,
+      riskLevel: riskLevel,
+      riskScore: riskScore,
       reasons: reasons,
       suggests_probe: isSuspect || riskScore >= 25,
       lexical_density: lexicalDensity

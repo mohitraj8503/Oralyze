@@ -529,8 +529,8 @@ def _keyword_grade(question: dict, transcript: str) -> dict:
     words = norm_transcript.split() if norm_transcript else []
     key_points = [kp.strip() for kp in question.get("key_points", []) if kp]
 
-    # Section 3 / Fix B: Transcripts with fewer than 5 words must be 'no_answer'
-    if len(words) < 5:
+    # Only a truly empty transcript is 'no_answer'. A short but real answer must be graded.
+    if len(words) < 2:
         return {
             "score": 0.0,
             "verdict": "no_answer",
@@ -540,6 +540,20 @@ def _keyword_grade(question: dict, transcript: str) -> dict:
             "missing_points": key_points,
             "feedback": "We could not hear an answer — record again or type it",
             "ideal_answer": f"Key concepts that should be explained: {', '.join(key_points)}."
+        }
+
+    q_text_lower = str(question.get("text", "")).lower()
+    is_identity_q = bool(re.search(r"(full name|your name|roll (number|no)|enrol?ment|introduce yourself|your background|which branch|your branch)", q_text_lower)) or str(question.get("type", "")).lower() == "fixed"
+    if is_identity_q and len(words) >= 3:
+        return {
+            "score": 8.0,
+            "verdict": "correct",
+            "no_answer": False,
+            "source": "identity",
+            "correct_points": key_points,
+            "missing_points": [],
+            "feedback": "Identity details recorded.",
+            "ideal_answer": ""
         }
 
     correct_points = []
@@ -578,6 +592,12 @@ def _keyword_grade(question: dict, transcript: str) -> dict:
             score = 3.0
         source = "heuristic"
 
+    stopwords = {'what','when','where','which','while','would','could','should','about','explain','describe','difference','between','there','their','these','those','does','your','from','with','that','this','have','will','more','than','into','also','used','using','give','example','real','world'}
+    q_topic_tokens = [w for w in re.sub(r'[^a-z0-9\s]', ' ', q_text_lower).split() if len(w) > 4 and w not in stopwords]
+    topic_hits = sum(1 for t in q_topic_tokens if t in norm_transcript)
+    if topic_hits >= 1 and score < 4.0:
+        score = 4.0
+
     # Three verdicts, not two: correct (>= 7.0), partial (4.0 - 6.9), wrong (< 4.0)
     if score >= 7.0:
         verdict = "correct"
@@ -604,7 +624,7 @@ def grade_answer(question: dict, transcript: str, language: str = "en") -> dict:
     """Grade viva answer using IBM Granite rubric prompt with deterministic keyword fallback."""
     raw_transcript = (transcript or "").strip()
     words = raw_transcript.split()
-    if len(words) < 5:
+    if len(words) < 2:
         return _keyword_grade(question, transcript)
 
     qid = str(question.get("qid") or question.get("id") or "")

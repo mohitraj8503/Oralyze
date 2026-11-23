@@ -414,7 +414,7 @@
       const words = (liveTranscript || '').trim().split(/\s+/).filter(Boolean);
       const scriptCheck = window.OralyzeGrader.detectScriptedResponse ?
         window.OralyzeGrader.detectScriptedResponse(liveTranscript, latencySec, words.length) :
-        { is_suspect: false, risk_level: "CLEAN", reasons: [], suggests_probe: false };
+        { is_suspect: false, riskLevel: "CLEAN", reasons: [], suggests_probe: false };
 
       if (!viva.integrity_log) viva.integrity_log = [];
       const nowIso = new Date().toISOString();
@@ -442,7 +442,7 @@
           timestamp: nowIso,
           question_id: question.id,
           trigger: `AI Script / Recital Anomaly: ${scriptCheck.reasons.join('; ')}`,
-          severity: scriptCheck.risk_level,
+          severity: scriptCheck.riskLevel || scriptCheck.severity || "MEDIUM",
           type: "SCRIPTED_RECITATION"
         });
       }
@@ -802,6 +802,64 @@
     return await res.json();
   }
 
+  async function synthesizeSpeech(text, languageCode = 'en-IN') {
+    if (isHostedMode() || !text || document.hidden) return null;
+    try {
+      const res = await fetch(`${getApiBase()}/api/voice/tts?format=json`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+        body: JSON.stringify({
+          text: String(text).slice(0, 1000),
+          language_code: languageCode || 'en-IN'
+        })
+      });
+      if (!res.ok) return null;
+      const data = await res.json().catch(() => null);
+      return data && data.audio_b64 ? data.audio_b64 : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  async function transcribeVoice(audioBlob, language = 'auto') {
+    if (isHostedMode() || !audioBlob) return null;
+    try {
+      const formData = new FormData();
+      formData.append('audio', audioBlob, 'audio.webm');
+      formData.append('language', language || 'auto');
+      const res = await fetch(`${getApiBase()}/api/voice/stt`, {
+        method: 'POST',
+        body: formData
+      });
+      if (!res.ok) return null;
+      return await res.json().catch(() => null);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  async function getVoiceHealth() {
+    if (isHostedMode()) {
+      return { provider: 'browser', key_present: false, credits_ok: true };
+    }
+    try {
+      const res = await fetch(`${getApiBase()}/api/voice/health`);
+      if (res.ok) return await res.json();
+    } catch (e) {}
+    return { provider: 'browser', key_present: false, credits_ok: true };
+  }
+
+  async function getVoiceUsage() {
+    if (isHostedMode()) {
+      return { today_calls: 0, cached_hit_rate: 1.0, estimated_spend_inr: 0, daily_limit: 300 };
+    }
+    try {
+      const res = await fetch(`${getApiBase()}/api/voice/usage`);
+      if (res.ok) return await res.json();
+    } catch (e) {}
+    return { today_calls: 0, cached_hit_rate: 1.0, estimated_spend_inr: 0, daily_limit: 300 };
+  }
+
   // Expose global OralyzeApi
   window.OralyzeApi = {
     getApiBase,
@@ -812,6 +870,10 @@
     submitAnswer,
     getLive,
     getScorecard,
-    getDashboard
+    getDashboard,
+    synthesizeSpeech,
+    transcribeVoice,
+    getVoiceHealth,
+    getVoiceUsage
   };
 })();

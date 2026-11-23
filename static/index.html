@@ -1842,6 +1842,11 @@
       </div>
 
 
+      <!-- Voice Layer Attribution (Section 5) -->
+      <footer class="mt-auto pt-8 pb-4 text-center text-xs text-slate-400">
+        <span>Voice: Oralyze Voice · Sarvam AI</span>
+      </footer>
+
     </div>
   </main>
 
@@ -1959,7 +1964,14 @@
 
     // Deterministic Advance with Epoch Increment (Fix A)
     function advanceTo(index) {
-      state.epoch += 1;
+      state.epoch = (state.epoch || 0) + 1;
+      if (typeof liveFinalTranscript !== 'undefined') liveFinalTranscript = '';
+      if (typeof liveInterimTranscript !== 'undefined') liveInterimTranscript = '';
+      if (typeof recordedWordTimings !== 'undefined') recordedWordTimings = [];
+      if (typeof secondsElapsed !== 'undefined') secondsElapsed = 0;
+      const tEl = document.getElementById('liveTranscript') || document.querySelector('[data-transcript]');
+      if (tEl) tEl.textContent = '';
+
       const currentEpoch = state.epoch;
       if (state.abortController) {
         try { state.abortController.abort(); } catch(e) {}
@@ -3226,9 +3238,7 @@
       // If user typed or spoke numbers
       if (numbersFound.length > 0) {
         const hasExact = numbersFound.includes(expectedNumStr);
-        const hasConflicts = numbersFound.some(n => n !== expectedNumStr);
-        // If exact number is found with no conflicting numbers (e.g. "5" and not "55")
-        if (hasExact && !hasConflicts) return true;
+        if (hasExact) return true;   // "2 plus 2 is 4" contains 2, 2 and 4 — the answer being present is enough
         // If user gave a single number that is different (e.g. 55 when expected is 5)
         if (numbersFound.length === 1 && !hasExact) return false;
       }
@@ -3265,7 +3275,7 @@
       const wordCount = transcript.split(/\s+/).filter(Boolean).length;
 
       // Isolated Under-Length / No-Answer Check (Fix B & Fix A)
-      if (!isMathDemoActive && wordCount < 5) {
+      if (!isMathDemoActive && wordCount < 2) {
         const qid = (state.questions && state.questions[currentQIndex]?.id) || `Q${currentQIndex + 1}`;
         state.answers[qid] = {
           qid: qid,
@@ -3403,7 +3413,7 @@
 
         if (result.adaptive_probe_triggered) {
           totalQuestions = result.next_question_index !== undefined ? Math.max(totalQuestions + 1, currentQIndex + 2) : totalQuestions + 1;
-          showProctorAlert("Oralize AI: Spontaneous counter-question triggered to probe conceptual depth!");
+          console.log("[oralyze] adaptive follow-up injected (silent)");
         }
 
         const ev = result.evaluation || result;

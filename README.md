@@ -296,11 +296,25 @@ Oralyze/
 
 ---
 
+## Voice Layer & Provider Policy
+
+Oralyze integrates **Oralyze Voice** — a unified multi-tiered voice and speech architecture:
+
+- **Primary Voice Layer (Oralyze Voice)**: Powered by **Sarvam AI** (`bulbul:v3` neural TTS, `saaras:v3` acoustic STT with word-level timestamps, `mayura:v1` translation, and `text-lid`). Delivers high-fidelity Indian-accent English, Hindi, and Hinglish understanding with low latency and economical resource usage.
+- **Reasoning Engine**: **IBM Granite 3.3 8B Instruct** (`ibm/granite-3-3-8b-instruct` on watsonx.ai). Drives question generation, Bloom's taxonomy structuring, and deep rubric evaluation.
+- **Enterprise Speech Fallback**: **IBM Watson Text to Speech & Speech to Text** via raw REST endpoints.
+- **Resilient Fallback Ladder**:
+  $$\text{Oralyze Voice (Sarvam AI)} \longrightarrow \text{IBM Watson Speech} \longrightarrow \text{Browser Web Speech API} \longrightarrow \text{Typed Input}$$
+  A viva session is **always completable** even if every external cloud voice provider is offline or quota-exhausted.
+
+---
+
 ## Tech Stack
 
 - **Backend**: Python 3.12, Flask, raw REST with `requests` (no heavyweight SDKs)
-- **Generative AI**: IBM watsonx.ai (Granite 3.3 8B Instruct)
-- **Speech Technologies**: IBM Watson Text to Speech, IBM Watson Speech to Text, Web Speech API
+- **Generative AI & Reasoning**: IBM watsonx.ai (Granite 3.3 8B Instruct)
+- **Primary Voice AI**: Sarvam AI (Bulbul v3 TTS, Saaras v3 STT, Mayura v1 Translation, Text-LID)
+- **Secondary Speech AI**: IBM Watson Text to Speech, IBM Watson Speech to Text, Web Speech API
 - **Database**: IBM Cloudant NoSQL DB (Apache CouchDB based)
 - **Frontend**: Vanilla ES6+ JavaScript, Tailwind CSS, Web Audio API AnalyserNode
 
