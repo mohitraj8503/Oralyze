@@ -135,16 +135,19 @@ def health_check():
 def preview_viva():
     """Generate question preview from teacher natural language prompt."""
     data = request.get_json(silent=True) or {}
-    prompt = (data.get("prompt") or "").strip()
+    host_prompt = (data.get("host_prompt") or data.get("prompt") or "").strip()
+    logger.info(f"[viva] host_prompt: {host_prompt[:120]}")
+    mode = (data.get("mode") or "university_viva").strip()
     difficulty = (data.get("difficulty") or "medium").strip().lower()
     language = (data.get("language") or "English").strip()
     count = data.get("count", 5)
 
     result, status_code = preview_viva_from_prompt(
-        prompt=prompt,
+        prompt=host_prompt,
         difficulty=difficulty,
         language=language,
-        count=count
+        count=count,
+        mode=mode
     )
     return jsonify(result), status_code
 
@@ -153,7 +156,9 @@ def preview_viva():
 def create_viva():
     """Teacher creates a viva room from prompt or custom questions list."""
     data = request.get_json(silent=True) or {}
-    prompt = (data.get("prompt") or "").strip()
+    host_prompt = (data.get("host_prompt") or data.get("prompt") or "").strip()
+    logger.info(f"[viva] host_prompt: {host_prompt[:120]}")
+    mode = (data.get("mode") or "university_viva").strip()
     difficulty = (data.get("difficulty") or "medium").strip().lower()
     language = (data.get("language") or "English").strip()
     custom_questions = data.get("questions")
@@ -169,25 +174,27 @@ def create_viva():
     if isinstance(custom_questions, list) and len(custom_questions) >= 1:
         subject = (data.get("subject") or "Viva Assessment").strip()
         topic = (data.get("topic") or "Oral Exam").strip()
-        title = (data.get("title") or f"{subject} Viva").strip()
+        title = (data.get("title") or f"{subject} Assessment").strip()
         raw_questions = custom_questions
         source = data.get("source", "teacher")
     else:
         # Generate from prompt if no questions list provided
-        if not prompt:
-            prompt = (data.get("subject") or "DBMS") + " oral viva questions"
+        if not host_prompt:
+            host_prompt = (data.get("subject") or "Computer Systems") + " oral assessment questions"
         preview_res, status_code = preview_viva_from_prompt(
-            prompt=prompt,
+            prompt=host_prompt,
             difficulty=difficulty,
             language=language,
-            count=count
+            count=count,
+            mode=mode,
+            candidate_seed=data.get("candidate_id", "")
         )
         if status_code != 200:
             return jsonify(preview_res), status_code
 
-        title = preview_res.get("title", "Viva Examination")
-        subject = preview_res.get("subject", "Engineering")
-        topic = preview_res.get("topic", "Viva Voce")
+        title = preview_res.get("title", "Assessment Examination")
+        subject = preview_res.get("subject", "Systems")
+        topic = preview_res.get("topic", "Assessment")
         difficulty = preview_res.get("difficulty", difficulty)
         language = preview_res.get("language", language)
         raw_questions = preview_res.get("questions", [])
@@ -239,7 +246,9 @@ def create_viva():
         "title": title,
         "subject": subject,
         "topic": topic,
-        "prompt": prompt,
+        "prompt": host_prompt,
+        "host_prompt": host_prompt,
+        "mode": mode,
         "difficulty": difficulty,
         "language": language,
         "source": source,
@@ -591,16 +600,25 @@ def get_viva_scorecard(code: str):
 
     if room and room.get("answers"):
         answers = room["answers"]
-        n = len(answers)
-        avg_content = round(sum(a["content_pct"] for a in answers) / n, 1)
-        avg_delivery = round(sum(a["delivery"]["fluency_score"] for a in answers) / n, 1)
-        avg_total = round(sum(a["total"] for a in answers) / n, 1)
+        # Fix F: Exclude no_answer answers from denominator
+        scored = [a for a in answers if not a.get("no_answer") and a.get("verdict") != "no_answer"]
+        n = max(len(scored), 1)
+
+        avg_content = round(sum(a["content_pct"] for a in scored) / n, 1) if scored else 0.0
+        avg_delivery = round(sum(a["delivery"]["fluency_score"] for a in scored) / n, 1) if scored else 0.0
+        row_avg_total = round(sum(a["total"] for a in scored) / n, 1) if scored else 0.0
+
+        # Assert arithmetic truth
+        computed_formula = round((avg_content * 0.7) + (avg_delivery * 0.3), 1)
+        if abs(row_avg_total - computed_formula) > 0.05:
+            logger.warning(f"[scorecard] arithmetic mismatch: row_avg={row_avg_total}, formula={computed_formula}. Using row average.")
+        avg_total = row_avg_total
 
         # Aggregate competency ratings (0 to 100)
-        avg_concept = round(sum(a.get("competencies", {}).get("concept_depth", a["content_pct"]) for a in answers) / n, 1)
-        avg_clarity = round(sum(a.get("competencies", {}).get("clarity", a["delivery"]["fluency_score"]) for a in answers) / n, 1)
-        avg_reasoning = round(sum(a.get("competencies", {}).get("reasoning", a["content_pct"]) for a in answers) / n, 1)
-        avg_confidence = round(sum(a.get("competencies", {}).get("confidence", a["delivery"]["fluency_score"]) for a in answers) / n, 1)
+        avg_concept = round(sum(a.get("competencies", {}).get("concept_depth", a["content_pct"]) for a in scored) / n, 1) if scored else 0.0
+        avg_clarity = round(sum(a.get("competencies", {}).get("clarity", a["delivery"]["fluency_score"]) for a in scored) / n, 1) if scored else 0.0
+        avg_reasoning = round(sum(a.get("competencies", {}).get("reasoning", a["content_pct"]) for a in scored) / n, 1) if scored else 0.0
+        avg_confidence = round(sum(a.get("competencies", {}).get("confidence", a["delivery"]["fluency_score"]) for a in scored) / n, 1) if scored else 0.0
 
         competencies = {
             "concept_depth": avg_concept,

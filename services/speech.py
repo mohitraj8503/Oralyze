@@ -13,6 +13,9 @@ from services.ibm_auth import get_token
 
 logger = logging.getLogger("speech")
 
+# Persistent HTTP session for Watson Speech services (Fix D)
+_speech_session = requests.Session()
+
 # Cached TTS voices to avoid redundant network calls
 _cached_hindi_voice: str | None = None
 _tts_audio_cache: dict[str, bytes] = {}
@@ -40,7 +43,7 @@ def discover_hindi_voice() -> str:
         token = get_token()
         url = f"{Config.TTS_URL}/v1/voices"
         headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
-        resp = requests.get(url, headers=headers, timeout=15)
+        resp = _speech_session.get(url, headers=headers, timeout=15)
         if resp.status_code == 200:
             voices = resp.json().get("voices", [])
             for v in voices:
@@ -88,7 +91,7 @@ def synthesize(text: str, language: str = "en") -> bytes:
             "Accept": "audio/mp3"
         }
         payload = {"text": clean_text}
-        resp = requests.post(url, headers=headers, json=payload, timeout=30)
+        resp = _speech_session.post(url, headers=headers, json=payload, timeout=20)
 
         if resp.status_code == 200 and resp.content:
             _tts_audio_cache[cache_key] = resp.content
@@ -166,7 +169,7 @@ def transcribe(audio_bytes: bytes, content_type: str = "audio/webm", language: s
             "Authorization": f"Bearer {token}",
             "Content-Type": content_type or "audio/webm"
         }
-        resp = requests.post(url, headers=headers, data=audio_bytes, timeout=120)
+        resp = _speech_session.post(url, headers=headers, data=audio_bytes, timeout=60)
 
         if resp.status_code != 200:
             logger.warning("[speech] Watson STT returned HTTP %s: %s", resp.status_code, resp.text)

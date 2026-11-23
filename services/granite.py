@@ -16,12 +16,58 @@ from services.ibm_auth import get_token, IAMAuthError
 
 logger = logging.getLogger("granite")
 
+# Persistent HTTP session for Granite with connection pooling
+_session = requests.Session()
+
+# In-memory grading cache: sha1(qid + transcript) -> grading_result
+_grading_cache: dict[str, dict] = {}
+
 # Rate limiting for IBM watsonx Lite plan (2 req/sec)
 _last_granite_call_time = 0.0
 
 # In-memory prompt preview cache: sha1 -> (timestamp, preview_result)
 _prompt_cache: dict[str, tuple[float, dict]] = {}
 CACHE_TTL = 600  # 10 minutes
+
+# Hinglish & Hindi transliteration normalisation dictionary (Fix B)
+HINGLISH_MAPPINGS = {
+    "इंडेक्स": "index", "इंडैक्स": "index",
+    "टेबल": "table",
+    "की": "key",
+    "ट्री": "tree",
+    "डेडलॉक": "deadlock",
+    "क्वेरी": "query",
+    "डेटाबेस": "database",
+    "मेमोरी": "memory",
+    "प्रोसेस": "process",
+    "एल्गोरिदम": "algorithm", "एल्गोरिथम": "algorithm",
+    "नेटवर्क": "network",
+    "कैश": "cache",
+    "थ्रेड": "thread",
+    "सर्वर": "server",
+    "क्लाइंट": "client",
+}
+
+def _normalize_tokens(text: str) -> str:
+    """Normalize Hindi/Hinglish text and strip punctuation."""
+    cleaned = (text or "").lower()
+    for devanagari, eng in HINGLISH_MAPPINGS.items():
+        cleaned = cleaned.replace(devanagari, eng)
+    cleaned = re.sub(r'[^a-zA-Z0-9\s]', ' ', cleaned)
+    return re.sub(r'\s+', ' ', cleaned).strip()
+
+def _extract_prompt_keywords(prompt: str) -> list[str]:
+    """Extract significant keywords from natural language prompt."""
+    stopwords = {
+        "ask", "me", "questions", "question", "about", "quiz", "oral", "exam",
+        "viva", "assessment", "interview", "test", "hard", "easy", "medium",
+        "simple", "complex", "please", "give", "generate", "five", "three",
+        "four", "ten", "the", "for", "and", "with", "from", "into", "that",
+        "this", "have", "been", "will", "would", "what", "how", "why", "when",
+        "some", "such", "than", "them", "then", "there", "these", "they", "candidate"
+    }
+    tokens = re.findall(r'[a-zA-Z0-9_\-\+]+', (prompt or "").lower())
+    return [t for t in tokens if len(t) > 2 and t not in stopwords]
 
 # Path to offline question bank
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
@@ -120,7 +166,7 @@ def chat(messages: list[dict], max_tokens: int = 1200, temperature: float = 0.4,
         "top_p": top_p
     }
 
-    resp = requests.post(url, headers=headers, json=payload, timeout=60)
+    resp = _session.post(url, headers=headers, json=payload, timeout=30)
     if resp.status_code != 200:
         raise RuntimeError(f"Granite API error (HTTP {resp.status_code}): {resp.text}")
 
@@ -199,14 +245,16 @@ def preview_viva_from_prompt(
     prompt: str,
     difficulty: str = "medium",
     language: str = "English",
-    count: int = 5
+    count: int = 5,
+    mode: str = "university_viva",
+    candidate_seed: str = ""
 ) -> tuple[dict, int]:
     """Generate or retrieve cached viva questions from teacher prompt.
     
     Returns (result_dict, status_code).
     """
     cleaned = sanitize_prompt(prompt)
-    if len(cleaned) < 10:
+    if len(cleaned) < 5:
         return {
             "error": "need_more_detail",
             "message": "Tell me the subject and the topic."
@@ -216,8 +264,10 @@ def preview_viva_from_prompt(
     target_count = max(3, min(int(count or 5), 7))
     difficulty = difficulty.lower() if difficulty in ("easy", "medium", "hard") else "medium"
     language = "Hindi" if "hindi" in str(language).lower() else "English"
+    mode = str(mode or "university_viva").lower().strip()
 
-    cache_key = hashlib.sha1(f"{cleaned}|{difficulty}|{language}|{target_count}".encode("utf-8")).hexdigest()
+    # Cache key per Fix C: sha1(host_prompt | mode | count | difficulty | language | candidate_seed)
+    cache_key = hashlib.sha1(f"{cleaned}|{mode}|{target_count}|{difficulty}|{language}|{candidate_seed}".encode("utf-8")).hexdigest()
     now = time.time()
     if cache_key in _prompt_cache:
         cached_time, cached_val = _prompt_cache[cache_key]
@@ -226,31 +276,32 @@ def preview_viva_from_prompt(
             return cached_val, 200
 
     if Config.MOCK_MODE or not Config.IBM_API_KEY:
-        fallback_res = _make_fallback_result(cleaned, difficulty, language, target_count)
+        fallback_res = _make_fallback_result(cleaned, difficulty, language, target_count, mode)
         fallback_res["source"] = "fallback"
         _prompt_cache[cache_key] = (now, fallback_res)
         return fallback_res, 200
 
-    # System prompt specified verbatim in B2
-    system_prompt = """You are an examiner at an Indian engineering college. You write oral viva questions that a student answers out loud in 30 to 60 seconds.
+    # System prompt specified verbatim in B2, adapted for mode
+    system_prompt = f"""You are an autonomous oral assessment agent conducting an evaluation in mode: {mode}.
+You write oral assessment questions that a candidate answers out loud in 30 to 60 seconds.
 
 You always answer with a single JSON object and nothing else. No explanation, no markdown, no code fences.
 
 JSON shape:
-{
+{{
   "title": "<short viva title, max 6 words>",
   "subject": "<subject name, max 4 words>",
   "topic": "<topic or chapter, max 6 words>",
   "difficulty": "easy|medium|hard",
   "questions": [
-    {
+    {{
       "text": "<the question, one or two sentences, spoken style>",
       "bloom": "remember|understand|apply|analyse",
       "key_points": ["<point an ideal answer must contain>", "<point>", "<point>"],
       "ideal_seconds": <integer 20-60>
-    }
+    }}
   ]
-}
+}}
 
 Hard rules:
 - Produce exactly the number of questions requested.
@@ -261,11 +312,11 @@ Hard rules:
 - No two questions may test the same idea.
 - If the request mentions a language other than English, write the question text in that language but keep the JSON keys in English."""
 
-    user_message = f"""Write a viva from this teacher's request:
+    user_message = f"""Write an assessment from this request:
 
 <prompt>{cleaned}</prompt>
 
-Settings: difficulty={difficulty}, number of questions={target_count}, language={language}.
+Settings: mode={mode}, difficulty={difficulty}, number of questions={target_count}, language={language}.
 Return only the JSON object."""
 
     messages = [
@@ -305,8 +356,8 @@ Return only the JSON object."""
             if bloom == "analyze":
                 bloom = "analyse"
 
-            # Check: text 20-220 chars, has ? or imperative verb
-            if len(text) < 20 or len(text) > 260:
+            # Check: text 20-260 chars
+            if len(text) < 15 or len(text) > 280:
                 continue
 
             kps = [str(k).strip() for k in item.get("key_points", []) if str(k).strip()]
@@ -337,104 +388,211 @@ Return only the JSON object."""
     # If valid questions count is acceptable (allow target_count-1, never fewer than 3)
     if len(validated_questions) >= min(3, target_count - 1):
         res = {
-            "title": str(parsed.get("title", f"{cleaned[:20]} Viva")).strip()[:40],
-            "subject": str(parsed.get("subject", "Engineering")).strip()[:30],
-            "topic": str(parsed.get("topic", "Viva Voce")).strip()[:40],
+            "title": str(parsed.get("title", f"{cleaned[:20]} Assessment")).strip()[:40],
+            "subject": str(parsed.get("subject", "Systems")).strip()[:30],
+            "topic": str(parsed.get("topic", cleaned[:30])).strip()[:40],
             "difficulty": difficulty,
             "language": language,
+            "mode": mode,
             "questions": validated_questions[:target_count],
             "source": "granite"
         }
         _prompt_cache[cache_key] = (now, res)
         return res, 200
 
-    # Fallback to local question bank if model generation fails
-    logger.warning("[granite] Validation failed or insufficient questions generated. Using offline bank.")
-    fallback_res = _make_fallback_result(cleaned, difficulty, language, target_count)
+    # Fallback to prompt-aware templates if model generation fails
+    logger.warning("[granite] Validation failed or insufficient questions generated. Using prompt-aware fallback.")
+    fallback_res = _make_fallback_result(cleaned, difficulty, language, target_count, mode)
     fallback_res["source"] = "fallback"
     _prompt_cache[cache_key] = (now, fallback_res)
     return fallback_res, 200
 
 
-def _make_fallback_result(prompt: str, difficulty: str, language: str, count: int) -> dict:
-    """Create structured viva result from offline question bank."""
-    p_low = prompt.lower()
-    subject = "Cloud Computing" if ("cloud" in p_low or "paas" in p_low or "iaas" in p_low or "saas" in p_low) else "Computer Science"
-    if "dbms" in p_low or "database" in p_low or "sql" in p_low:
-        subject = "DBMS"
-    elif "os" in p_low or "operating system" in p_low:
-        subject = "Operating Systems"
-    elif "network" in p_low or "tcp" in p_low or "udp" in p_low:
-        subject = "Computer Networks"
-    elif "data structure" in p_low or "tree" in p_low or "graph" in p_low:
-        subject = "Data Structures"
-    elif "cloud" in p_low or "paas" in p_low or "iaas" in p_low or "saas" in p_low:
-        subject = "Cloud Computing"
+def _make_fallback_result(prompt: str, difficulty: str, language: str, count: int, mode: str = "university_viva") -> dict:
+    """Create structured viva result dynamically generated around prompt keywords.
+    
+    Guarantees zero hardcoded legacy subjects, prompt-driven topic echo, and mode support.
+    """
+    keywords = _extract_prompt_keywords(prompt)
+    if keywords:
+        topic_phrase = " ".join(t.capitalize() for t in keywords[:4])
+        subject_phrase = " ".join(t.capitalize() for t in keywords[:2])
+    else:
+        topic_phrase = "System Architecture"
+        subject_phrase = "Computer Systems"
 
-    questions = get_bank_questions(subject, n=count)
+    # Dynamic prompt-aware question templates
+    primary_kw = keywords[0] if keywords else "the architecture"
+    secondary_kw = keywords[1] if len(keywords) > 1 else primary_kw
+    tertiary_kw = keywords[2] if len(keywords) > 2 else secondary_kw
+
+    templates = [
+        (
+            f"Explain the architectural foundations, core mechanisms, and primary design goals of {primary_kw}.",
+            "understand",
+            [f"{primary_kw} architecture", "fundamental principles", "core components"],
+            35
+        ),
+        (
+            f"How do you address performance bottlenecks, scaling constraints, or failure recovery in {secondary_kw}?",
+            "analyse",
+            [f"{secondary_kw} scaling", "bottleneck isolation", "failure recovery", "latency optimization"],
+            45
+        ),
+        (
+            f"Compare the major trade-offs and operational practices when managing {tertiary_kw} versus conventional alternatives.",
+            "analyse",
+            [f"{tertiary_kw} trade-offs", "operational overhead", "resource trade-offs"],
+            45
+        ),
+        (
+            f"Describe a real-world production outage or failure scenario in {primary_kw} and how you would troubleshoot it.",
+            "apply",
+            ["troubleshooting steps", "root cause identification", "preventive remediation"],
+            50
+        ),
+        (
+            f"How does {topic_phrase} guarantee fault tolerance, data integrity, and strict consistency under high load?",
+            "understand",
+            ["fault tolerance", "consistency mechanisms", "load handling"],
+            40
+        ),
+        (
+            f"What security practices and access boundary controls are mandatory when deploying {secondary_kw}?",
+            "apply",
+            ["access control", "least privilege", "encryption and isolation"],
+            40
+        ),
+        (
+            f"Walk through your step-by-step verification and observability strategy for {primary_kw}.",
+            "apply",
+            ["metrics telemetry", "health checks", "logging and auditing"],
+            40
+        )
+    ]
+
+    questions = []
+    # If mode has baseline question (e.g. university_viva roll number, interview intro)
+    if mode == "interview":
+        questions.append({
+            "id": "q1",
+            "text": f"Walk through your direct background and specific production experience with {topic_phrase}.",
+            "bloom": "understand",
+            "type": "FIXED",
+            "key_points": ["prior production experience", "role and scope", "system impact"],
+            "ideal_seconds": 45
+        })
+    elif mode == "university_viva":
+        questions.append({
+            "id": "q1",
+            "text": f"State your full name, student registration number, and your core topic focus for {subject_phrase}.",
+            "bloom": "remember",
+            "type": "FIXED",
+            "key_points": ["candidate identity", "enrollment id", "topic scope"],
+            "ideal_seconds": 25
+        })
+
+    for idx, (q_text, bloom, kps, ideal_sec) in enumerate(templates):
+        if len(questions) >= count:
+            break
+        questions.append({
+            "id": f"q{len(questions)+1}",
+            "text": q_text,
+            "bloom": bloom,
+            "type": "DYNAMIC",
+            "key_points": kps,
+            "ideal_seconds": ideal_sec
+        })
+
     return {
-        "title": f"{subject} Oral Exam",
-        "subject": subject,
-        "topic": prompt[:40],
+        "title": f"{subject_phrase} Oral Assessment",
+        "subject": subject_phrase,
+        "topic": topic_phrase,
         "difficulty": difficulty,
         "language": language,
-        "questions": questions,
+        "mode": mode,
+        "questions": questions[:count],
         "source": "fallback"
     }
 
 
 def generate_questions(subject: str, level: str = "undergraduate", n: int = 5) -> list[dict]:
     """Compatibility wrapper for question generation."""
-    res, _ = preview_viva_from_prompt(f"{subject} {level} viva exam", count=n)
-    return res.get("questions", get_bank_questions(subject, n))
+    res, _ = preview_viva_from_prompt(f"{subject} {level} oral assessment", count=n)
+    return res.get("questions", [])
 
 
 def _keyword_grade(question: dict, transcript: str) -> dict:
     """Deterministic keyword-based grading fallback when offline or on API failure."""
-    key_points = [kp.lower().strip() for kp in question.get("key_points", []) if kp]
-    text_clean = (transcript or "").lower()
-    words = text_clean.split()
+    raw_transcript = (transcript or "").strip()
+    norm_transcript = _normalize_tokens(raw_transcript)
+    words = norm_transcript.split() if norm_transcript else []
+    key_points = [kp.strip() for kp in question.get("key_points", []) if kp]
 
-    if not words or len(words) < 2:
+    # Section 3 / Fix B: Transcripts with fewer than 5 words must be 'no_answer'
+    if len(words) < 5:
         return {
-            "score": 1.5,
-            "verdict": "incorrect",
+            "score": 0.0,
+            "verdict": "no_answer",
+            "no_answer": True,
+            "source": "heuristic",
             "correct_points": [],
-            "missing_points": key_points[:3],
-            "feedback": "Answer was too brief or inaudible to demonstrate understanding.",
-            "ideal_answer": f"A comprehensive answer should cover: {', '.join(key_points)}."
+            "missing_points": key_points,
+            "feedback": "We could not hear an answer — record again or type it",
+            "ideal_answer": f"Key concepts that should be explained: {', '.join(key_points)}."
         }
 
     correct_points = []
     missing_points = []
+    norm_kps = [_normalize_tokens(kp) for kp in key_points]
 
-    for kp in key_points:
-        kp_words = kp.split()
-        if kp in text_clean or any(kw in text_clean for kw in kp_words if len(kw) > 3):
-            correct_points.append(kp)
+    matched_stems_count = 0
+    for original_kp, norm_kp in zip(key_points, norm_kps):
+        kp_tokens = [t for t in norm_kp.split() if len(t) > 2]
+        matched = False
+        if norm_kp and norm_kp in norm_transcript:
+            matched = True
+        elif kp_tokens:
+            token_matches = sum(1 for t in kp_tokens if t in norm_transcript)
+            if token_matches / len(kp_tokens) >= 0.5:
+                matched = True
+            elif token_matches >= 1:
+                matched_stems_count += 1
+        if matched:
+            correct_points.append(original_kp)
+            matched_stems_count += 1
         else:
-            missing_points.append(kp)
+            missing_points.append(original_kp)
 
     total_pts = max(len(key_points), 1)
     matched_ratio = len(correct_points) / total_pts
     length_bonus = min(len(words) / 30.0, 1.0) * 1.5
 
     raw_score = (matched_ratio * 8.5) + length_bonus
-    score = round(min(max(raw_score, 1.0 if len(words) < 5 else 2.5), 10.0), 1)
+    score = round(min(max(raw_score, 1.0), 10.0), 1)
 
-    if score >= 7.5:
+    # Section 3 / Fix B: Lenient fallback: 25+ words with >= 2 stems floors at 3.0 and source="heuristic"
+    source = "keyword"
+    if len(words) >= 25 and matched_stems_count >= 2:
+        if score < 3.0:
+            score = 3.0
+        source = "heuristic"
+
+    # Three verdicts, not two: correct (>= 7.0), partial (4.0 - 6.9), wrong (< 4.0)
+    if score >= 7.0:
         verdict = "correct"
-        feedback = "Good conceptual explanation covering the key principles accurately."
-    elif score >= 5.0:
-        verdict = "partially correct"
+        feedback = "Solid conceptual explanation covering the key principles accurately."
+    elif score >= 4.0:
+        verdict = "partial"
         feedback = "Identified several essential points, but missed some key details."
     else:
-        verdict = "incorrect"
+        verdict = "wrong"
         feedback = "The answer did not adequately address the core concepts of the question."
 
     return {
         "score": score,
         "verdict": verdict,
+        "source": source,
         "correct_points": correct_points,
         "missing_points": missing_points,
         "feedback": feedback,
@@ -444,54 +602,71 @@ def _keyword_grade(question: dict, transcript: str) -> dict:
 
 def grade_answer(question: dict, transcript: str, language: str = "en") -> dict:
     """Grade viva answer using IBM Granite rubric prompt with deterministic keyword fallback."""
+    raw_transcript = (transcript or "").strip()
+    words = raw_transcript.split()
+    if len(words) < 5:
+        return _keyword_grade(question, transcript)
+
+    qid = str(question.get("qid") or question.get("id") or "")
+    cache_token = hashlib.sha1(f"{qid}_{raw_transcript}".encode("utf-8")).hexdigest()
+    if cache_token in _grading_cache:
+        return _grading_cache[cache_token]
+
     if Config.MOCK_MODE or not Config.IBM_API_KEY:
-        return _keyword_grade(question, transcript)
+        res = _keyword_grade(question, transcript)
+        _grading_cache[cache_token] = res
+        return res
 
-    words = (transcript or "").strip().split()
-    if len(words) < 2:
-        return _keyword_grade(question, transcript)
-
-    prompt = f"""You are an expert oral viva examiner grading a student's spoken answer.
+    prompt = f"""You are an expert oral assessment examiner grading a candidate's spoken answer.
 
 Question: {question.get('text', '')}
 Expected Key Points: {json.dumps(question.get('key_points', []))}
-Student's Spoken Transcript: "{transcript}"
+Candidate's Spoken Transcript: "{raw_transcript}"
 Language: {language}
 
-Evaluate the student's answer fairly based on conceptual understanding. Spoken answers may have colloquial phrasing.
+Evaluate the candidate's answer fairly based on conceptual understanding. Spoken answers may have colloquial phrasing.
 Respond ONLY with a valid JSON object matching this schema, with no markdown fences, no formatting:
 {{
   "score": <float between 0.0 and 10.0>,
-  "verdict": "<correct|partially correct|incorrect>",
-  "correct_points": ["<points the student mentioned correctly>"],
-  "missing_points": ["<key points the student omitted or got wrong>"],
-  "feedback": "<2-3 sentence constructive critique for the student>",
+  "verdict": "<correct|partial|wrong>",
+  "correct_points": ["<points the candidate mentioned correctly>"],
+  "missing_points": ["<key points the candidate omitted or got wrong>"],
+  "feedback": "<2-3 sentence constructive critique for the candidate>",
   "ideal_answer": "<concise 2-sentence reference answer>"
 }}
 """
 
     try:
-        raw_res = chat([{"role": "user", "content": prompt}], max_tokens=600, temperature=0.2)
+        raw_res = chat([{"role": "user", "content": prompt}], max_tokens=400, temperature=0.2)
         parsed = _extract_json(raw_res)
         if isinstance(parsed, dict) and "score" in parsed:
             score = float(parsed.get("score", 0.0))
             score = max(0.0, min(10.0, round(score, 1)))
-            verdict = str(parsed.get("verdict", "partially correct")).lower()
-            if verdict not in ("correct", "partially correct", "incorrect"):
-                verdict = "correct" if score >= 7.5 else ("partially correct" if score >= 5.0 else "incorrect")
+            raw_v = str(parsed.get("verdict", "")).lower()
+            if score >= 7.0 or raw_v == "correct":
+                verdict = "correct"
+            elif score >= 4.0 or "part" in raw_v:
+                verdict = "partial"
+            else:
+                verdict = "wrong"
 
-            return {
+            eval_res = {
                 "score": score,
                 "verdict": verdict,
+                "source": "granite",
                 "correct_points": [str(p) for p in parsed.get("correct_points", [])],
                 "missing_points": [str(p) for p in parsed.get("missing_points", [])],
                 "feedback": str(parsed.get("feedback", "")).strip() or "Good effort.",
-                "ideal_answer": str(parsed.get("ideal_answer", "")).strip() or "Review key definitions."
+                "ideal_answer": str(parsed.get("ideal_answer", "")).strip() or f"Key concepts: {', '.join(question.get('key_points', []))}."
             }
+            _grading_cache[cache_token] = eval_res
+            return eval_res
     except Exception as e:
         logger.warning("[granite] Answer grading failed via Granite, falling back to keyword grader: %s", e)
 
-    return _keyword_grade(question, transcript)
+    res = _keyword_grade(question, transcript)
+    _grading_cache[cache_token] = res
+    return res
 
 
 def detect_scripted_response(

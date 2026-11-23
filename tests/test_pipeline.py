@@ -257,7 +257,7 @@ class TestAdaptiveProbing(unittest.TestCase):
 
         prev_q = {"text": "Explain B+ tree indexing."}
         ans = "I used a clustered index on the primary key to speed up retrieval."
-        probe = generate_adaptive_probe(prev_q, ans, topic="DBMS", reason="deepen")
+        probe = generate_adaptive_probe(prev_q, ans, topic="Database Systems", reason="deepen")
 
         self.assertEqual(probe["type"], "FOLLOW-UP")
         self.assertEqual(probe["bloom"], "analyse")

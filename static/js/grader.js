@@ -5,29 +5,69 @@
 (function() {
   const FILLERS = ['um', 'uh', 'like', 'actually', 'basically', 'you know', 'sort of', 'kind of'];
 
+  const HINGLISH_MAP = {
+    'इंडेक्स': 'index', 'इंडैक्स': 'index',
+    'टेबल': 'table',
+    'की': 'key',
+    'ट्री': 'tree',
+    'डेडलॉक': 'deadlock',
+    'क्वेरी': 'query',
+    'डेटाबेस': 'database',
+    'मेमोरी': 'memory',
+    'प्रोसेस': 'process',
+    'एल्गोरिदम': 'algorithm', 'एल्गोरिथम': 'algorithm',
+    'नेटवर्क': 'network',
+    'कैश': 'cache',
+    'थ्रेड': 'thread',
+    'सर्वर': 'server',
+    'क्लाइंट': 'client'
+  };
+
+  const graderCache = new Map();
+
   function normalizeText(text) {
-    return (text || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
+    let cleaned = (text || '').toLowerCase();
+    for (const [dev, eng] of Object.entries(HINGLISH_MAP)) {
+      cleaned = cleaned.replaceAll(dev, eng);
+    }
+    return cleaned.replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
   }
 
   function gradeAnswer(question, transcript, language = 'en') {
+    if (!question) {
+      throw new Error("GradeAnswer requires a valid question object.");
+    }
     const rawTranscript = (transcript || '').trim();
     const clean = normalizeText(rawTranscript);
     const words = clean ? clean.split(' ') : [];
     const keyPoints = (question.key_points || []).map(kp => (kp || '').trim()).filter(Boolean);
+    const qid = String(question.id || question.qid || '');
 
-    if (words.length < 2) {
-      return {
+    // Check cache
+    const cacheKey = `${qid}_${clean}`;
+    if (graderCache.has(cacheKey)) {
+      return graderCache.get(cacheKey);
+    }
+
+    // Section 3 / Fix B: Transcripts with fewer than 5 words must be 'no_answer'
+    if (words.length < 5) {
+      const noAnsResult = {
         score: 0.0,
-        verdict: 'incorrect',
+        verdict: 'no_answer',
+        no_answer: true,
+        source: 'heuristic',
         correct_points: [],
         missing_points: keyPoints,
-        feedback: 'No spoken response detected. Please answer orally and clearly.',
-        ideal_answer: keyPoints.length ? keyPoints.join('. ') + '.' : 'A comprehensive technical explanation covering all core principles.'
+        feedback: 'We could not hear an answer — record again or type it',
+        ideal_answer: keyPoints.length ? keyPoints.join('. ') + '.' : 'A comprehensive technical explanation covering key principles.'
       };
+      graderCache.set(cacheKey, noAnsResult);
+      return noAnsResult;
     }
 
     const correctPoints = [];
     const missingPoints = [];
+    let matchedStemsCount = 0;
 
     for (const kp of keyPoints) {
       const kpClean = normalizeText(kp);
@@ -45,11 +85,14 @@
         }
         if (matchCount / kpTokens.length >= 0.5) {
           matched = true;
+        } else if (matchCount >= 1) {
+          matchedStemsCount++;
         }
       }
 
       if (matched) {
         correctPoints.push(kp);
+        matchedStemsCount++;
       } else {
         missingPoints.push(kp);
       }
@@ -60,21 +103,32 @@
     const lengthBonus = Math.min(words.length / 30.0, 1.0) * 1.5;
     const rawScore = (matchedRatio * 8.5) + lengthBonus;
 
-    let minFloor = words.length < 5 ? 1.0 : 2.5;
-    let score = Math.min(Math.max(rawScore, minFloor), 10.0);
+    let score = Math.min(Math.max(rawScore, 1.0), 10.0);
     score = Math.round(score * 10) / 10;
 
-    let verdict = 'partially correct';
-    if (score >= 7.5) {
+    // Section 3 / Fix B: Lenient fallback floor for 25+ words with >= 2 stems
+    let source = 'keyword';
+    if (words.length >= 25 && matchedStemsCount >= 2) {
+      if (score < 3.0) {
+        score = 3.0;
+      }
+      source = 'heuristic';
+    }
+
+    // Three verdicts, not two: correct (>= 7.0), partial (4.0 - 6.9), wrong (< 4.0)
+    let verdict = 'wrong';
+    if (score >= 7.0) {
       verdict = 'correct';
-    } else if (score < 4.0) {
-      verdict = 'incorrect';
+    } else if (score >= 4.0) {
+      verdict = 'partial';
+    } else {
+      verdict = 'wrong';
     }
 
     let feedback = '';
     if (verdict === 'correct') {
       feedback = 'Solid explanation covering the essential concepts clearly.';
-    } else if (verdict === 'partially correct') {
+    } else if (verdict === 'partial') {
       const missingHint = missingPoints.slice(0, 2).join(' and ');
       feedback = missingHint ? `Good attempt, but make sure to elaborate on ${missingHint}.` : 'Fair answer, could be more comprehensive.';
     } else {
@@ -83,14 +137,18 @@
 
     const idealAnswer = keyPoints.length ? keyPoints.join('. ') + '.' : 'A comprehensive technical explanation covering key principles.';
 
-    return {
+    const result = {
       score,
       verdict,
+      source,
       correct_points: correctPoints,
       missing_points: missingPoints,
       feedback,
       ideal_answer: idealAnswer
     };
+
+    graderCache.set(cacheKey, result);
+    return result;
   }
 
   function calculateDeliveryScore(wordTimestamps, durationSeconds) {

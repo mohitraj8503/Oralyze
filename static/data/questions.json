@@ -97,7 +97,7 @@
       ]
     },
     {
-      "text": "What are deadlocks in DBMS and how can they be prevented or detected?",
+      "text": "What are deadlocks in database systems and how can they be prevented or detected?",
       "level": "apply",
       "key_points": [
         "mutual exclusion",

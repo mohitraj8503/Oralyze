@@ -95,7 +95,7 @@
     bundledQuestionsCache = [
       {
         id: "q1",
-        subject: "DBMS",
+        subject: "Database Systems",
         topic: "Indexing and B+ Trees",
         text: "Explain what a B+ tree index is and why it is preferred over a binary search tree in relational databases.",
         bloom: "understand",
@@ -104,7 +104,7 @@
       },
       {
         id: "q2",
-        subject: "DBMS",
+        subject: "Database Systems",
         topic: "Transactions",
         text: "What are ACID properties in database management systems and why are they critical?",
         bloom: "understand",
@@ -113,7 +113,7 @@
       },
       {
         id: "q3",
-        subject: "DBMS",
+        subject: "Database Systems",
         topic: "Normalization",
         text: "Differentiate between Third Normal Form (3NF) and Boyce-Codd Normal Form (BCNF).",
         bloom: "analyze",
@@ -477,19 +477,22 @@
         probeQuestion = probe;
       }
 
+      const isNoAns = Boolean(contentResult.no_answer || contentResult.verdict === 'no_answer');
       const evaluation = {
         question_id: question.id,
         index: questionIndex,
         type: question.type || 'DYNAMIC',
         question_text: question.text,
         student_transcript: liveTranscript,
-        content_score: contentResult.score,
-        delivery_score: deliveryResult.delivery_score,
-        overall_score: overall,
-        verdict: contentResult.verdict,
+        content_score: isNoAns ? 0.0 : contentResult.score,
+        delivery_score: isNoAns ? 0 : deliveryResult.delivery_score,
+        overall_score: isNoAns ? 0 : overall,
+        verdict: isNoAns ? 'no_answer' : contentResult.verdict,
+        no_answer: isNoAns,
+        source: contentResult.source || 'keyword',
         feedback: contentResult.feedback,
-        correct_points: contentResult.correct_points,
-        missing_points: contentResult.missing_points,
+        correct_points: contentResult.correct_points || [],
+        missing_points: contentResult.missing_points || [],
         ideal_answer: contentResult.ideal_answer,
         competencies: competencies,
         anti_cheating: {
@@ -508,9 +511,11 @@
       viva.answers.push(evaluation);
       viva.current_question = questionIndex + 1;
       viva.last_score = {
-        content: contentResult.score,
-        delivery: deliveryResult.delivery_score,
-        overall: overall,
+        content: evaluation.content_score,
+        delivery: evaluation.delivery_score,
+        overall: evaluation.overall_score,
+        verdict: evaluation.verdict,
+        no_answer: isNoAns,
         student_transcript: liveTranscript
       };
 
@@ -523,14 +528,17 @@
 
       // If completed, save full session into oralyze.sessions
       if (viva.status === 'completed') {
-        const avgContent = Math.round((viva.answers.reduce((acc, a) => acc + (a.content_score || 0), 0) / viva.answers.length) * 10) / 10;
-        const avgDelivery = Math.round(viva.answers.reduce((acc, a) => acc + (a.delivery_score || 0), 0) / viva.answers.length);
-        const overallFinal = Math.round(((avgContent * 10) * 0.7) + (avgDelivery * 0.3));
+        const scoredAnswers = viva.answers.filter(a => !a.no_answer && a.verdict !== 'no_answer');
+        const denom = Math.max(scoredAnswers.length, 1);
+        const avgContent = scoredAnswers.length ? Math.round((scoredAnswers.reduce((acc, a) => acc + (a.content_score || 0), 0) / denom) * 10) / 10 : 0.0;
+        const avgDelivery = scoredAnswers.length ? Math.round(scoredAnswers.reduce((acc, a) => acc + (a.delivery_score || 0), 0) / denom) : 0;
+        const rowAvgTotal = scoredAnswers.length ? Math.round(scoredAnswers.reduce((acc, a) => acc + (a.overall_score || 0), 0) / denom) : 0;
+        const overallFinal = rowAvgTotal;
 
-        const avgConcept = Math.round(viva.answers.reduce((acc, a) => acc + (a.competencies?.concept_depth || a.content_score * 10), 0) / viva.answers.length);
-        const avgClarity = Math.round(viva.answers.reduce((acc, a) => acc + (a.competencies?.clarity || a.delivery_score), 0) / viva.answers.length);
-        const avgReasoning = Math.round(viva.answers.reduce((acc, a) => acc + (a.competencies?.reasoning || a.content_score * 10), 0) / viva.answers.length);
-        const avgConfidence = Math.round(viva.answers.reduce((acc, a) => acc + (a.competencies?.confidence || a.delivery_score), 0) / viva.answers.length);
+        const avgConcept = scoredAnswers.length ? Math.round(scoredAnswers.reduce((acc, a) => acc + (a.competencies?.concept_depth || a.content_score * 10), 0) / denom) : 0;
+        const avgClarity = scoredAnswers.length ? Math.round(scoredAnswers.reduce((acc, a) => acc + (a.competencies?.clarity || a.delivery_score), 0) / denom) : 0;
+        const avgReasoning = scoredAnswers.length ? Math.round(scoredAnswers.reduce((acc, a) => acc + (a.competencies?.reasoning || a.content_score * 10), 0) / denom) : 0;
+        const avgConfidence = scoredAnswers.length ? Math.round(scoredAnswers.reduce((acc, a) => acc + (a.competencies?.confidence || a.delivery_score), 0) / denom) : 0;
 
         const intLog = viva.integrity_log || [];
         const hasHigh = intLog.some(l => l.severity === 'HIGH');
@@ -661,14 +669,17 @@
       const vivas = getStoredVivas();
       const viva = vivas[key.toUpperCase()];
       if (viva && viva.answers && viva.answers.length) {
-        const avgContent = Math.round((viva.answers.reduce((acc, a) => acc + (a.content_score || 0), 0) / viva.answers.length) * 10) / 10;
-        const avgDelivery = Math.round(viva.answers.reduce((acc, a) => acc + (a.delivery_score || 0), 0) / viva.answers.length);
-        const overallFinal = Math.round(((avgContent * 10) * 0.7) + (avgDelivery * 0.3));
+        const scoredAnswers = viva.answers.filter(a => !a.no_answer && a.verdict !== 'no_answer');
+        const denom = Math.max(scoredAnswers.length, 1);
+        const avgContent = scoredAnswers.length ? Math.round((scoredAnswers.reduce((acc, a) => acc + (a.content_score || 0), 0) / denom) * 10) / 10 : 0.0;
+        const avgDelivery = scoredAnswers.length ? Math.round(scoredAnswers.reduce((acc, a) => acc + (a.delivery_score || 0), 0) / denom) : 0;
+        const rowAvgTotal = scoredAnswers.length ? Math.round(scoredAnswers.reduce((acc, a) => acc + (a.overall_score || 0), 0) / denom) : 0;
+        const overallFinal = rowAvgTotal;
 
-        const avgConcept = Math.round(viva.answers.reduce((acc, a) => acc + (a.competencies?.concept_depth || a.content_score * 10), 0) / viva.answers.length);
-        const avgClarity = Math.round(viva.answers.reduce((acc, a) => acc + (a.competencies?.clarity || a.delivery_score), 0) / viva.answers.length);
-        const avgReasoning = Math.round(viva.answers.reduce((acc, a) => acc + (a.competencies?.reasoning || a.content_score * 10), 0) / viva.answers.length);
-        const avgConfidence = Math.round(viva.answers.reduce((acc, a) => acc + (a.competencies?.confidence || a.delivery_score), 0) / viva.answers.length);
+        const avgConcept = scoredAnswers.length ? Math.round(scoredAnswers.reduce((acc, a) => acc + (a.competencies?.concept_depth || a.content_score * 10), 0) / denom) : 0;
+        const avgClarity = scoredAnswers.length ? Math.round(scoredAnswers.reduce((acc, a) => acc + (a.competencies?.clarity || a.delivery_score), 0) / denom) : 0;
+        const avgReasoning = scoredAnswers.length ? Math.round(scoredAnswers.reduce((acc, a) => acc + (a.competencies?.reasoning || a.content_score * 10), 0) / denom) : 0;
+        const avgConfidence = scoredAnswers.length ? Math.round(scoredAnswers.reduce((acc, a) => acc + (a.competencies?.confidence || a.delivery_score), 0) / denom) : 0;
 
         const intLog = viva.integrity_log || [];
         const hasHigh = intLog.some(l => l.severity === 'HIGH');
@@ -744,7 +755,7 @@
             session_id: "demo_101",
             code: "A7K2QX",
             student_name: "Aarav Sharma",
-            subject: "DBMS",
+            subject: "Database Systems",
             topic: "Indexing & B+ Trees",
             date: "2026-11-20T10:30:00Z",
             content_score: 8.2,
