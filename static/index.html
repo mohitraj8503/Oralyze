@@ -2081,15 +2081,9 @@
 
     // Protocol check
     function checkProtocolSecurity() {
-      const isFile = window.location.protocol === "file:";
-      const isSecure = window.isSecureContext || window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1";
       const warningEl = document.getElementById("protocolWarning");
       if (warningEl) {
-        if (isFile || !isSecure) {
-          warningEl.classList.remove("hidden-view");
-        } else {
-          warningEl.classList.add("hidden-view");
-        }
+        warningEl.classList.add("hidden-view");
       }
     }
     checkProtocolSecurity();

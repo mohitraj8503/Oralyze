@@ -87,8 +87,14 @@ Most college evaluation projects are standard CRUD apps (forms, attendance, dash
       <p><strong>5. Classroom Analytics & Session Log</strong><br /><em>Instructor dashboard with aggregated session performance and Cloudant records.</em></p>
     </td>
     <td width="50%" align="center">
+      <a href="docs/screenshots/07-scorecard.png"><img src="docs/screenshots/07-scorecard.png" alt="Candidate Evaluation Scorecard" width="100%" /></a>
+      <p><strong>6. Comprehensive Evaluation Scorecard</strong><br /><em>70% Content + 30% Delivery score, 4-core competencies, and answer breakdowns.</em></p>
+    </td>
+  </tr>
+  <tr>
+    <td colspan="2" align="center">
       <a href="docs/screenshots/06-about-developer.png"><img src="docs/screenshots/06-about-developer.png" alt="Meet the Developer" width="100%" /></a>
-      <p><strong>6. Meet the Developer & Verified Credentials</strong><br /><em>Interactive resume viewer, live website links, technology competencies, and direct contact.</em></p>
+      <p><strong>7. Meet the Developer & Verified Credentials</strong><br /><em>Interactive resume viewer, live website links, technology competencies, and direct contact.</em></p>
     </td>
   </tr>
 </table>
