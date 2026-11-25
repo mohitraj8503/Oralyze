@@ -80,6 +80,31 @@ def options_handler(path):
         response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
     return response
 
+@app.route("/config.js")
+def config_js():
+    return send_from_directory("static", "config.js")
+
+
+@app.route("/manifest.webmanifest")
+def manifest():
+    return send_from_directory("static", "manifest.webmanifest")
+
+
+@app.route("/js/<path:filename>")
+def js_files(filename):
+    return send_from_directory("static/js", filename)
+
+
+@app.route("/assets/<path:filename>")
+def assets(filename):
+    return send_from_directory("static/assets", filename)
+
+
+@app.route("/favicon.ico")
+def favicon():
+    return send_from_directory("static", "favicon.ico")
+
+
 # In-memory room store: code -> room dict
 # code: 6 uppercase alphanumeric chars
 VIVAS: dict[str, dict] = {}
